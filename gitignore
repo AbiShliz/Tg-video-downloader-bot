@@ -1,0 +1,34 @@
+# Токены и секреты
+.env
+*.env
+config.py
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Виртуальное окружение
+venv/
+env/
+ENV/
+
+# Временные папки
+downloads/
+temp/
+tmp/
+
+# Видео файлы
+*.mp4
+*.webm
+*.mkv
+*.avi
+*.mov
+
+# Логи
+*.log
+
+# Файлы IDE
+.vscode/
+.idea/
