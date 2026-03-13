@@ -15,7 +15,7 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден!")
 
 # ⚠️ ВАЖНО: ВСТАВЬ СВОЙ ID СЮДА
-ADMIN_ID = 123456789  # 👈 ЗАМЕНИ НА СВОЙ ID!
+ADMIN_ID = 920343231  # 👈 ЗАМЕНИ НА СВОЙ ID!
 
 # Настройки yt-dlp
 YDL_OPTIONS = {'format': 'best[ext=mp4]/best', 'quiet': True}
