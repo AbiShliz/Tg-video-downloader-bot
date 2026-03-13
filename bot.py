@@ -474,10 +474,11 @@ async def ask_ai(prompt, user_id, model_type='chat'):
     logger.info(f"Ключ найден, первые символы: {api_key[:10]}...")
     
     free_models = {
-        'chat': 'google/gemini-2.0-flash-exp:free',
-        'creative': 'google/gemini-1.5-flash:free',
-        'fast': 'meta-llama/llama-3.2-3b-instruct:free'
-    }
+    'chat': 'google/gemini-1.5-flash:free',  # Более стабильная модель
+    'creative': 'google/gemini-1.5-pro:free',  # Если нужна креативность
+    'fast': 'mistralai/mistral-7b-instruct:free',  # Запасной вариант
+    'backup': 'microsoft/phi-3-mini-128k-instruct:free'  # Еще запасная
+}
     
     model = free_models.get(model_type, free_models['chat'])
     logger.info(f"Используемая модель: {model}")
