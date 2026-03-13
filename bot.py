@@ -2,6 +2,8 @@ import os
 import logging
 import sqlite3
 import time
+import random
+import string
 from datetime import datetime, timedelta
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -86,7 +88,11 @@ def init_db():
         ('last_download_date', 'TEXT'),
         ('plan', 'TEXT DEFAULT "basic"'),
         ('plan_expiry', 'TEXT'),
-        ('total_downloads', 'INTEGER DEFAULT 0')
+        ('total_downloads', 'INTEGER DEFAULT 0'),
+        ('referrer_id', 'INTEGER DEFAULT NULL'),
+        ('referral_code', 'TEXT UNIQUE'),
+        ('referral_count', 'INTEGER DEFAULT 0'),
+        ('bonus_downloads', 'INTEGER DEFAULT 0')
     ]
     
     for col_name, col_type in columns_to_add:
@@ -138,6 +144,12 @@ def save_user(user_id, username, first_name, last_name):
                      VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'basic', 0)''',
                   (user_id, username, first_name, last_name, now, now, today))
     
+    # Генерируем реферальный код, если его нет
+    c.execute("SELECT referral_code FROM users WHERE user_id = ?", (user_id,))
+    if not c.fetchone() or not c.fetchone()[0]:
+        code = f"ref{user_id}{random.randint(100, 999)}"
+        c.execute("UPDATE users SET referral_code = ? WHERE user_id = ?", (code, user_id))
+    
     conn.commit()
     conn.close()
 
@@ -163,20 +175,24 @@ def get_user_plan(user_id):
     return 'basic', None
 
 def check_download_limit(user_id):
-    """Проверка лимита скачиваний"""
+    """Проверка лимита скачиваний с учетом реферальных бонусов"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT plan, downloads_today FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT plan, downloads_today, bonus_downloads FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
     
     if not result:
         return True, 3
     
-    plan, downloads_today = result
-    limit = PLANS.get(plan, PLANS['basic'])['limit']
+    plan, downloads_today, bonus = result
+    bonus = bonus or 0
     
-    return downloads_today < limit, limit - downloads_today
+    # Базовый лимит + бонусы
+    base_limit = PLANS[plan]['limit']
+    total_limit = base_limit + bonus
+    
+    return downloads_today < total_limit, total_limit - downloads_today
 
 def increment_downloads(user_id):
     """Увеличить счетчик скачиваний"""
@@ -215,6 +231,56 @@ def get_stats():
     conn.close()
     return total_users, active_today, total_downloads, plans_stats
 
+# ========== РЕФЕРАЛЬНАЯ СИСТЕМА ==========
+def generate_referral_code(user_id):
+    """Генерирует уникальный реферальный код для пользователя"""
+    code = f"ref{user_id}{random.randint(100, 999)}"
+    return code
+
+def process_referral(new_user_id, referrer_code):
+    """Обрабатывает переход по реферальной ссылке"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Ищем пригласившего по коду
+    c.execute("SELECT user_id FROM users WHERE referral_code = ?", (referrer_code,))
+    referrer = c.fetchone()
+    
+    if referrer:
+        referrer_id = referrer[0]
+        
+        # Проверяем, что пользователь не приглашает сам себя
+        if referrer_id != new_user_id:
+            # Обновляем данные нового пользователя
+            c.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", 
+                     (referrer_id, new_user_id))
+            
+            # Увеличиваем счетчик рефералов у пригласившего
+            c.execute("UPDATE users SET referral_count = referral_count + 1, "
+                     "bonus_downloads = bonus_downloads + 3 WHERE user_id = ?", 
+                     (referrer_id,))
+            
+            logger.info(f"Пользователь {new_user_id} приглашен пользователем {referrer_id}")
+            
+            conn.commit()
+            conn.close()
+            return referrer_id
+    
+    conn.close()
+    return None
+
+def get_user_referral_info(user_id):
+    """Получает информацию о рефералах пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT referral_code, referral_count, bonus_downloads FROM users WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    
+    if result:
+        return result
+    return None, 0, 0
+
 # ========== ФУНКЦИЯ СКАЧИВАНИЯ ==========
 async def download_video(url):
     """Скачать видео по ссылке"""
@@ -237,11 +303,38 @@ async def download_video(url):
         return None
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик /start"""
+async def handle_referral_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик /start с поддержкой реферальных ссылок"""
     user = update.effective_user
+    args = context.args
+    
+    # Сохраняем пользователя
     save_user(user.id, user.username, user.first_name, user.last_name)
     
+    # Проверяем, есть ли реферальный код
+    if args and args[0].startswith('ref_'):
+        referrer_code = args[0].replace('ref_', '')
+        referrer_id = process_referral(user.id, referrer_code)
+        
+        if referrer_id:
+            # Отправляем уведомление пригласившему
+            try:
+                await context.bot.send_message(
+                    referrer_id,
+                    f"🎉 По твоей ссылке пришел новый друг {user.first_name}!\n"
+                    f"Ты получил +3 скачивания в день!"
+                )
+            except:
+                pass
+            
+            # Приветствие нового пользователя
+            await update.message.reply_text(
+                f"👋 Привет! Ты пришел по ссылке друга.\n"
+                f"В подарок получаешь +3 скачивания на первый день!\n\n"
+                f"Отправляй ссылки на видео и качай бесплатно!"
+            )
+    
+    # Основное приветствие
     welcome_text = (
         "🎬 *Привет! Я бот для скачивания видео*\n\n"
         "Просто отправь мне ссылку на видео из:\n"
@@ -251,6 +344,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 *Команды:*\n"
         "/plan — посмотреть тарифы\n"
         "/profile — мой профиль\n"
+        "/referral — реферальная программа\n"
         "/help — помощь"
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
@@ -263,7 +357,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Отправь её мне\n"
         "3. Получи видео\n\n"
         "Поддерживаются: YouTube, TikTok, Instagram\n\n"
-        "Для просмотра тарифов: /plan",
+        "🔹 *Команды:*\n"
+        "/plan — тарифы\n"
+        "/profile — профиль\n"
+        "/referral — рефералы (+3 скачивания за друга)\n"
+        "/stats — статистика (только админ)",
         parse_mode='Markdown'
     )
 
@@ -279,15 +377,18 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT downloads_today, total_downloads FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT downloads_today, total_downloads, bonus_downloads, referral_count FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
     
     downloads_today = result[0] if result else 0
     total_downloads = result[1] if result else 0
+    bonus = result[2] if result else 0
+    referral_count = result[3] if result else 0
     
     limit = PLANS[plan]['limit']
-    limit_display = '∞' if limit > 9999 else limit
+    total_limit = limit + bonus
+    limit_display = '∞' if total_limit > 9999 else total_limit
     
     expiry_text = f"до {expiry}" if expiry else "бессрочно"
     
@@ -297,18 +398,22 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Имя: {user.first_name}\n\n"
         f"💎 *Тариф:* {plan_name}\n"
         f"⏳ Действует: {expiry_text}\n"
-        f"📊 Сегодня: {downloads_today}/{limit_display}\n"
-        f"📥 Всего скачано: {total_downloads}"
+        f"📊 Сегодня: {downloads_today}/{total_limit}\n"
+        f"📥 Всего скачано: {total_downloads}\n\n"
+        f"👥 Рефералов: {referral_count}\n"
+        f"🎁 Бонус: +{bonus} скачиваний/день"
     )
     
-    keyboard = [[InlineKeyboardButton("🔝 Выбрать тариф", callback_data="show_plans")]]
+    keyboard = [
+        [InlineKeyboardButton("🔝 Выбрать тариф", callback_data="show_plans")],
+        [InlineKeyboardButton("👥 Реферальная программа", callback_data="show_referral")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(profile_text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать тарифы"""
-    # Проверяем, откуда пришел вызов (из callback или команды)
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -327,7 +432,7 @@ async def show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for plan_id, plan in PLANS.items():
         if plan_id == 'basic':
-            continue  # Базовый тариф не продаем
+            continue
         
         features = "\n".join([f"  • {f}" for f in plan['features']])
         text += f"{plan['name']}\n{plan['price']} ★ / месяц\n{features}\n\n"
@@ -346,6 +451,43 @@ async def show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
+async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать реферальную информацию"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Получаем информацию
+    code, count, bonus = get_user_referral_info(user_id)
+    
+    # Формируем реферальную ссылку
+    bot_username = (await context.bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start=ref_{code}"
+    
+    text = (
+        f"🔗 *Твоя реферальная ссылка:*\n"
+        f"`{referral_link}`\n\n"
+        f"📊 *Статистика:*\n"
+        f"• Приглашено друзей: {count}\n"
+        f"• Бонусных скачиваний: +{bonus} в день\n\n"
+        f"🎁 *Как это работает:*\n"
+        f"За каждого друга ты получаешь +3 скачивания в день навсегда!\n"
+        f"Друзья тоже получают +3 скачивания на первый день."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 Копировать ссылку", callback_data="copy_ref")],
+        [InlineKeyboardButton("◀️ Назад в профиль", callback_data="back_to_profile")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /referral"""
+    await show_referral(update, context)
+
 async def buy_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка покупки тарифа"""
     query = update.callback_query
@@ -360,9 +502,9 @@ async def buy_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_invoice(
         chat_id=query.from_user.id,
         title=title,
-        description=description[:255],  # Telegram ограничение
+        description=description[:255],
         payload=f"subscription_{plan_id}",
-        provider_token="",  # Пусто для Telegram Stars
+        provider_token="",
         currency="XTR",
         prices=[{"label": plan['name'], "amount": plan['price']}]
     )
@@ -403,15 +545,18 @@ async def back_to_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT downloads_today, total_downloads FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT downloads_today, total_downloads, bonus_downloads, referral_count FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
     
     downloads_today = result[0] if result else 0
     total_downloads = result[1] if result else 0
+    bonus = result[2] if result else 0
+    referral_count = result[3] if result else 0
     
     limit = PLANS[plan]['limit']
-    limit_display = '∞' if limit > 9999 else limit
+    total_limit = limit + bonus
+    limit_display = '∞' if total_limit > 9999 else total_limit
     
     expiry_text = f"до {expiry}" if expiry else "бессрочно"
     
@@ -421,14 +566,24 @@ async def back_to_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Имя: {user.first_name}\n\n"
         f"💎 *Тариф:* {plan_name}\n"
         f"⏳ Действует: {expiry_text}\n"
-        f"📊 Сегодня: {downloads_today}/{limit_display}\n"
-        f"📥 Всего скачано: {total_downloads}"
+        f"📊 Сегодня: {downloads_today}/{total_limit}\n"
+        f"📥 Всего скачано: {total_downloads}\n\n"
+        f"👥 Рефералов: {referral_count}\n"
+        f"🎁 Бонус: +{bonus} скачиваний/день"
     )
     
-    keyboard = [[InlineKeyboardButton("🔝 Выбрать тариф", callback_data="show_plans")]]
+    keyboard = [
+        [InlineKeyboardButton("🔝 Выбрать тариф", callback_data="show_plans")],
+        [InlineKeyboardButton("👥 Реферальная программа", callback_data="show_referral")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(profile_text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def copy_ref_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка копирования ссылки (просто уведомление)"""
+    query = update.callback_query
+    await query.answer("Ссылка скопирована! Отправь её друзьям.", show_alert=False)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика для админа"""
@@ -443,6 +598,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for plan, count in plans_stats:
         plans_text += f"{PLANS[plan]['name']}: {count}\n"
     
+    # Дополнительная статистика по рефералам
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT SUM(referral_count) FROM users")
+    total_referrals = c.fetchone()[0] or 0
+    c.execute("SELECT SUM(bonus_downloads) FROM users")
+    total_bonus = c.fetchone()[0] or 0
+    conn.close()
+    
     stats_text = f"""📊 **Статистика бота**
 
 👥 Всего пользователей: {total_users}
@@ -451,6 +615,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Тарифы:**
 {plans_text}
+
+**Рефералы:**
+• Всего приглашений: {total_referrals}
+• Всего бонусов: {total_bonus}
 
 💰 Баланс Amvera: ~110 ₽
 
@@ -469,9 +637,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка лимита
     can_download, remaining = check_download_limit(user.id)
     if not can_download:
+        # Получаем информацию о бонусе
+        _, _, bonus = get_user_referral_info(user.id)
         await update.message.reply_text(
             f"❌ Ты исчерпал лимит на сегодня.\n"
-            f"Купи подписку /plan, чтобы скачивать больше!"
+            f"Купи подписку /plan, чтобы скачивать больше!\n\n"
+            f"Или приведи друзей /referral и получай +3 скачивания за каждого!"
         )
         return
     
@@ -512,6 +683,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(filepath)
         await status_msg.delete()
         
+        # Если осталось мало скачиваний, напоминаем
+        _, remaining = check_download_limit(user.id)
+        if remaining < 3 and PLANS[get_user_plan(user.id)[0]]['limit'] < 9999:
+            await update.message.reply_text(
+                f"⚠️ У тебя осталось {remaining} скачиваний сегодня.\n"
+                f"Купи подписку /plan или приведи друзей /referral!"
+            )
+        
     except Exception as e:
         logger.error(f"Ошибка обработки: {e}")
         await status_msg.edit_text(
@@ -530,16 +709,20 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем обработчики команд
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", handle_referral_start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("plan", show_plans))
+    app.add_handler(CommandHandler("referral", show_referral))
+    app.add_handler(CommandHandler("ref", show_referral))  # сокращенный вариант
     app.add_handler(CommandHandler("stats", stats_command))
     
     # Добавляем обработчики callback-запросов
     app.add_handler(CallbackQueryHandler(show_plans, pattern="^show_plans$"))
+    app.add_handler(CallbackQueryHandler(show_referral, pattern="^show_referral$"))
     app.add_handler(CallbackQueryHandler(back_to_profile, pattern="^back_to_profile$"))
     app.add_handler(CallbackQueryHandler(buy_plan, pattern="^buy_"))
+    app.add_handler(CallbackQueryHandler(copy_ref_callback, pattern="^copy_ref$"))
     
     # Добавляем обработчики платежей
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
@@ -548,7 +731,7 @@ def main():
     # Добавляем обработчик сообщений (ссылки)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🚀 Бот с монетизацией успешно запущен!")
+    logger.info("🚀 Бот с монетизацией и реферальной системой успешно запущен!")
     
     # Запускаем бота
     app.run_polling()
