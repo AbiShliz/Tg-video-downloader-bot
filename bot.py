@@ -454,90 +454,80 @@ async def generate_image_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка отправки: {e}")
         await status_msg.edit_text("❌ Ошибка при отправке.")
 
-# ========== AI-ФУНКЦИИ ==========
+# ========== AI-ФУНКЦИИ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==========
 async def ask_ai(prompt, user_id, model_type='chat'):
-    """Запрос к AI через OpenRouter"""
+    """Запрос к AI через OpenRouter с перебором моделей при ошибке"""
     
     can, left = check_ai_limit(user_id)
     if not can:
-        return "❌ Ты исчерпал лимит AI-запросов на сегодня. Купи подписку /plan или приведи друзей /ref для увеличения лимита!"
+        return "❌ Ты исчерпал лимит AI-запросов на сегодня."
     
     api_key = os.environ.get('OPENROUTER_API_KEY')
-    
-    # 🔍 ДИАГНОСТИКА
-    logger.info(f"Получен запрос от пользователя {user_id}: {prompt[:50]}...")
-    
     if not api_key:
-        logger.error("OPENROUTER_API_KEY не найден в переменных окружения!")
-        return "❌ API-ключ OpenRouter не настроен. Обратись к администратору."
+        logger.error("OPENROUTER_API_KEY не найден!")
+        return "❌ API-ключ не настроен. Обратись к администратору."
     
-    logger.info(f"Ключ найден, первые символы: {api_key[:10]}...")
+    # Список моделей для перебора (по порядку надежности)
+    models_to_try = [
+        'google/gemini-1.5-flash:free',      # Самая стабильная
+        'mistralai/mistral-7b-instruct:free',  # Быстрая и надежная
+        'microsoft/phi-3-mini-128k-instruct:free',  # Хорошая замена
+        'meta-llama/llama-3.2-3b-instruct:free',  # Еще вариант
+        'google/gemini-1.5-pro:free',          # Если нужно качество
+        'openai/gpt-3.5-turbo:free'            # Запасной вариант
+    ]
     
-    free_models = {
-    'chat': 'google/gemini-1.5-flash:free',  # Более стабильная модель
-    'creative': 'google/gemini-1.5-pro:free',  # Если нужна креативность
-    'fast': 'mistralai/mistral-7b-instruct:free',  # Запасной вариант
-    'backup': 'microsoft/phi-3-mini-128k-instruct:free'  # Еще запасная
-}
+    system_prompt = "Ты AI-ассистент бота TikTokSavebot. Отвечай кратко, по делу, на том же языке, что и пользователь."
     
-    model = free_models.get(model_type, free_models['chat'])
-    logger.info(f"Используемая модель: {model}")
-    
-    system_prompt = """Ты AI-ассистент бота TikTokSavebot. Помогаешь с идеями для видео, текстами, хештегами, советами по продвижению. Отвечай кратко, по делу, на том же языке, что и пользователь."""
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = "https://openrouter.ai/api/v1/chat/completions"
+    for model in models_to_try:
+        try:
+            logger.info(f"Пробуем модель: {model}")
             
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://t.me/TikTokSavebot",
-                "X-Title": "TikTokSavebot"
-            }
-            
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 1000
-            }
-            
-            logger.info(f"Отправка запроса к OpenRouter")
-            
-            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                logger.info(f"Статус ответа: {resp.status}")
+            async with aiohttp.ClientSession() as session:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://t.me/TikTokSavebot",
+                    "X-Title": "TikTokSavebot"
+                }
                 
-                if resp.status == 200:
-                    data = await resp.json()
-                    if 'choices' in data and len(data['choices']) > 0:
-                        result = data['choices'][0]['message']['content']
-                        increment_ai_request(user_id)
-                        logger.info("✅ Успешный ответ от OpenRouter")
-                        return result
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 1000
+                }
+                
+                async with session.post(url, json=payload, headers=headers, timeout=60) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if 'choices' in data and len(data['choices']) > 0:
+                            result = data['choices'][0]['message']['content']
+                            increment_ai_request(user_id)
+                            logger.info(f"✅ Успешно с моделью: {model}")
+                            return result
+                        else:
+                            logger.warning(f"Модель {model} вернула неожиданный ответ")
+                            continue
+                    elif resp.status == 404:
+                        logger.warning(f"Модель {model} не найдена (404), пробуем следующую")
+                        continue
                     else:
-                        logger.error(f"Неожиданный ответ: {data}")
-                        return "❌ Неожиданный ответ от API."
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"Ошибка {resp.status}: {error_text}")
-                    
-                    if resp.status == 402:
-                        return "❌ Бесплатные лимиты OpenRouter исчерпаны."
-                    elif resp.status == 401:
-                        return "❌ Неверный API-ключ. Проверь настройки."
-                    else:
-                        return f"❌ Ошибка API (код {resp.status})."
+                        logger.warning(f"Модель {model} вернула статус {resp.status}")
+                        continue
+                        
+        except asyncio.TimeoutError:
+            logger.warning(f"Таймаут с моделью {model}")
+            continue
+        except Exception as e:
+            logger.warning(f"Ошибка с моделью {model}: {e}")
+            continue
     
-    except asyncio.TimeoutError:
-        logger.error("Timeout")
-        return "❌ Превышено время ожидания."
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        return "❌ Ошибка при обращении к AI."
+    return "❌ Все модели временно недоступны. Попробуй позже."
 
 # ========== ОСНОВНЫЕ КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
