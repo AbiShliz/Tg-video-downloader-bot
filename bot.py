@@ -7,6 +7,7 @@ import json
 import csv
 import aiohttp
 import asyncio
+import urllib.parse
 from datetime import datetime, timedelta
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -33,16 +34,16 @@ if not BOT_TOKEN:
 ADMIN_ID = 920343231  # ТВОЙ ID
 
 # ========== НАСТРОЙКИ API ==========
-# Для генерации изображений (бесплатные варианты)
-POLLINATIONS_API = "https://image.pollinations.ai/prompt/"  # Бесплатный API без ключа [citation:10]
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')  # Опционально
+# Для генерации изображений (бесплатные API без ключей)
+POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
+POLLINATIONS_FALLBACK = "https://pollinations.ai/p/"
 
 # Настройки для разных моделей генерации
 IMAGE_STYLES = {
-    'realistic': 'фотореализм, высокое качество, 4k',
-    'artistic': 'художественный стиль, арт, креативно',
-    'cartoon': 'мультяшный стиль, анимация, яркие цвета',
-    'sketch': 'скетч, набросок карандашом, черно-белый'
+    'realistic': 'фотореализм, высокое качество, 4k, детализировано',
+    'artistic': 'художественный стиль, арт, креативно, абстрактно',
+    'cartoon': 'мультяшный стиль, анимация, яркие цвета, дисней',
+    'sketch': 'скетч, набросок карандашом, черно-белый, эскиз'
 }
 
 # Лимиты генерации для разных тарифов
@@ -336,30 +337,61 @@ def get_stats():
 
 # ========== ФУНКЦИИ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ==========
 
-async def generate_image(prompt, style='realistic'):
-    """Генерация изображения через бесплатный Pollinations API [citation:10]"""
+async def generate_image(prompt, style='realistic', max_retries=3):
+    """Генерация изображения с запасными API и повторными попытками"""
     try:
         # Добавляем стиль к промпту
         style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
-        
-        # Кодируем промпт для URL
-        import urllib.parse
         encoded_prompt = urllib.parse.quote(style_prompt)
         
-        # Формируем URL с параметрами
-        image_url = f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
+        # Список API для попыток (если первый не работает, пробуем следующие)
+        apis = [
+            # Основной API Pollinations
+            f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux",
+            # Запасной вариант с другим эндпоинтом
+            f"{POLLINATIONS_FALLBACK}{encoded_prompt}?width=1024&height=1024&model=flux",
+            # Еще один вариант с другой моделью
+            f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&model=turbo",
+            # Без логотипа, другой формат
+            f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=any"
+        ]
         
-        # Скачиваем изображение
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
-                    return image_data
-                else:
-                    logger.error(f"Pollinations error: {resp.status}")
-                    return None
+        for attempt in range(max_retries):
+            for api_url in apis:
+                try:
+                    logger.info(f"Попытка генерации {attempt+1}/{max_retries}, API: {api_url[:50]}...")
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(api_url, timeout=30) as resp:
+                            if resp.status == 200:
+                                image_data = await resp.read()
+                                # Проверяем, что данные не пустые (минимальный размер PNG)
+                                if len(image_data) > 1000:
+                                    logger.info(f"✅ Успешная генерация с API: {api_url[:50]}...")
+                                    return image_data
+                                else:
+                                    logger.warning(f"API вернул слишком маленький файл: {len(image_data)} bytes")
+                            else:
+                                logger.warning(f"API {api_url[:50]}... вернул статус {resp.status}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Таймаут при запросе к {api_url[:50]}...")
+                except Exception as e:
+                    logger.warning(f"Ошибка при запросе к {api_url[:50]}...: {e}")
+                
+                # Небольшая пауза между запросами к разным API
+                await asyncio.sleep(1)
+            
+            # Если все API не сработали, ждем перед повторной попыткой
+            if attempt < max_retries - 1:
+                wait_time = 3 * (attempt + 1)
+                logger.info(f"Повторная попытка через {wait_time} секунд...")
+                await asyncio.sleep(wait_time)
+        
+        logger.error("Все API и попытки исчерпаны")
+        return None
+        
     except Exception as e:
-        logger.error(f"Image generation error: {e}")
+        logger.error(f"Критическая ошибка генерации: {e}")
         return None
 
 async def generate_image_with_style_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -377,11 +409,13 @@ async def generate_image_with_style_selection(update: Update, context: ContextTy
     
     if not prompt:
         await msg.reply_text(
-            "❓ Использование: /draw <описание>\n\n"
-            "Примеры:\n"
-            "/draw кот в космосе\n"
-            "/draw футуристический город, неон\n"
-            "Или просто отправь описание после команды!"
+            "❓ *Как пользоваться генерацией:*\n\n"
+            "Просто напиши:\n"
+            "`/draw кот в космосе`\n"
+            "`/draw футуристический город`\n"
+            "`/draw девушка с зонтиком`\n\n"
+            "Я предложу выбрать стиль и создам картинку!",
+            parse_mode='Markdown'
         )
         return
     
@@ -394,12 +428,13 @@ async def generate_image_with_style_selection(update: Update, context: ContextTy
         [InlineKeyboardButton("🎨 Арт", callback_data="style_artistic")],
         [InlineKeyboardButton("🧸 Мультяшный", callback_data="style_cartoon")],
         [InlineKeyboardButton("✏️ Скетч", callback_data="style_sketch")],
-        [InlineKeyboardButton("🎭 Без стиля (как есть)", callback_data="style_none")]
+        [InlineKeyboardButton("🎭 Без стиля", callback_data="style_none")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await msg.reply_text(
-        f"🎨 *Выбери стиль для:*\n\n_{prompt}_",
+        f"🎨 *Выбери стиль для:*\n\n"
+        f"«{prompt}»",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -415,41 +450,68 @@ async def generate_image_callback(update: Update, context: ContextTypes.DEFAULT_
     # Получаем промпт из контекста
     prompt = context.user_data.get('pending_prompt', '')
     if not prompt:
-        await query.edit_message_text("❌ Ошибка: промпт не найден. Попробуй /draw заново.")
+        await query.edit_message_text(
+            "❌ Ошибка: промпт не найден. Попробуй /draw заново."
+        )
         return
     
     # Определяем стиль
     style = query.data.replace('style_', '')
     if style == 'none':
-        style_prompt = prompt
+        style_display = "без стиля"
     else:
-        style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
+        style_display = style
     
     # Проверяем лимит
     can, left = check_image_limit(user_id)
     if not can:
         await query.edit_message_text(
-            "❌ Ты исчерпал лимит генераций на сегодня.\n"
-            "Купи подписку /plan или приведи друзей /ref для увеличения лимита!"
+            "❌ *Лимит исчерпан*\n\n"
+            f"Ты использовал все генерации на сегодня.\n"
+            f"Купи подписку /plan или приведи друзей /ref для увеличения лимита!",
+            parse_mode='Markdown'
         )
         return
     
     # Сообщение о начале генерации
-    await query.edit_message_text("🎨 Генерирую изображение... Это займет несколько секунд.")
+    status_msg = await query.edit_message_text(
+        f"🎨 *Генерирую...*\n\n"
+        f"«{prompt}»\n"
+        f"Стиль: {style_display}\n\n"
+        f"⏳ Это займет несколько секунд",
+        parse_mode='Markdown'
+    )
+    
+    # Пробуем сгенерировать
+    image_data = await generate_image(prompt, style if style != 'none' else 'realistic')
+    
+    if not image_data:
+        # Если не удалось сгенерировать, предлагаем креативные варианты
+        creative_prompts = [
+            f"котик в стиле {style_display}",
+            f"фантастический пейзаж, {style_display}",
+            f"красивый закат, {style_display}"
+        ]
+        random_prompt = random.choice(creative_prompts)
+        
+        await status_msg.edit_text(
+            f"⚠️ *Не удалось сгенерировать*\n\n"
+            f"Сервис генерации временно перегружен.\n\n"
+            f"🎯 *Попробуй другой запрос:*\n"
+            f"`/draw {random_prompt}`\n\n"
+            f"или повтори через несколько минут.",
+            parse_mode='Markdown'
+        )
+        return
     
     try:
-        # Генерируем изображение
-        image_data = await generate_image(prompt, style if style != 'none' else 'realistic')
-        
-        if not image_data:
-            await query.edit_message_text("❌ Не удалось сгенерировать изображение. Попробуй позже.")
-            return
-        
         # Отправляем изображение
         await context.bot.send_photo(
             chat_id=user_id,
             photo=BytesIO(image_data),
-            caption=f"🖼️ *Твоя генерация:*\n_{prompt}_\n\n✨ Стиль: {style}",
+            caption=f"🖼️ *Готово!*\n\n"
+                    f"«{prompt}»\n"
+                    f"✨ Стиль: {style_display}",
             parse_mode='Markdown'
         )
         
@@ -457,19 +519,20 @@ async def generate_image_callback(update: Update, context: ContextTypes.DEFAULT_
         increment_image_generation(user_id)
         
         # Удаляем сообщение с прогрессом
-        await query.delete_message()
+        await status_msg.delete()
         
         # Проверяем остаток
         _, left = check_image_limit(user_id)
         if left < 3:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"⚠️ У тебя осталось {left} генераций сегодня.\nПриведи друга /ref, чтобы получить больше!"
+                text=f"⚠️ У тебя осталось {left} генераций сегодня.\n"
+                     f"Приведи друга /ref, чтобы получить больше!"
             )
-        
+            
     except Exception as e:
-        logger.error(f"Image generation error: {e}")
-        await query.edit_message_text("❌ Ошибка при генерации. Попробуй другую фразу или позже.")
+        logger.error(f"Ошибка отправки изображения: {e}")
+        await status_msg.edit_text("❌ Ошибка при отправке. Попробуй еще раз.")
 
 # ========== AI-ФУНКЦИИ ==========
 async def ask_ai(prompt, user_id, model_type='chat'):
@@ -481,7 +544,20 @@ async def ask_ai(prompt, user_id, model_type='chat'):
     # Здесь можно подключить любой AI API
     # Пока возвращаем заглушку
     increment_ai_request(user_id)
-    return f"🤖 *AI-ассистент:*\n\nЯ получил твой запрос: '{prompt}'\n\n(Для полноценной работы AI нужно подключить API)"
+    
+    # Простые ответы на частые вопросы
+    responses = {
+        'привет': "👋 Привет! Чем могу помочь?",
+        'как дела': "🤖 У меня всё отлично! Готов помогать с видео и картинками!",
+        'что ты умеешь': "🎨 Я умею:\n• Скачивать видео из соцсетей\n• Генерировать картинки по тексту\n• Отвечать на вопросы\n• Помогать с идеями для контента"
+    }
+    
+    # Проверяем на частые вопросы
+    for key in responses:
+        if key in prompt.lower():
+            return responses[key]
+    
+    return f"🤖 *AI-ассистент:*\n\nЯ получил твой запрос: '{prompt}'\n\n(Для полноценного AI нужно подключить API)"
 
 # ========== СКАЧИВАНИЕ ВИДЕО ==========
 async def download_video(url):
@@ -537,26 +613,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         referrer = process_referral(user.id, ref_code)
         if referrer:
             await update.message.reply_text(
-                "🎉 Ты пришел по ссылке друга!\n"
+                "🎉 *Ты пришел по ссылке друга!*\n\n"
                 "✨ Ты получил +3 скачивания на сегодня!\n"
-                "🤖 А твой друг получил +3 скачивания, +2 AI и +1 генерацию навсегда!"
+                "🤖 А твой друг получил бонусы навсегда!",
+                parse_mode='Markdown'
             )
     
     text = (
         "🎬 *TikTokSavebot — Скачивай, общайся и твори*\n\n"
         "📥 *Скачивание видео:*\n"
-        "Просто отправь ссылку на видео из TikTok, Instagram, YouTube\n\n"
+        "• TikTok • Instagram • YouTube\n"
+        "Просто отправь ссылку!\n\n"
         "🎨 *Генерация изображений:*\n"
-        "/draw [описание] — создать картинку по тексту\n\n"
+        "• `/draw кот в космосе` — создать картинку\n\n"
         "🤖 *AI-ассистент:*\n"
-        "/ask [вопрос] — задай вопрос или попроси написать текст\n\n"
+        "• `/ask вопрос` — задай вопрос\n\n"
         "📋 *Команды:*\n"
-        "/draw — генерация картинки\n"
-        "/ask — спросить AI\n"
-        "/plan — тарифы\n"
-        "/profile — профиль\n"
-        "/ref — рефералы (+3 видео, +2 AI, +1 картинка за друга)\n"
-        "/help — помощь"
+        "• /draw — создать картинку\n"
+        "• /ask — спросить AI\n"
+        "• /plan — тарифы\n"
+        "• /profile — профиль\n"
+        "• /ref — рефералы (получи бонусы)\n"
+        "• /help — помощь"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -565,41 +643,38 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         "📖 *Помощь*\n\n"
-        "🔹 *Для всех:*\n"
-        "/start — начало\n"
-        "/draw [описание] — создать изображение\n"
-        "/ask [вопрос] — спросить AI\n"
-        "/profile — профиль\n"
-        "/plan — тарифы\n"
-        "/ref — рефералы (+3 видео, +2 AI, +1 картинка за друга)\n\n"
-        "🔹 *Как скачать видео:*\n"
-        "1. Найди ссылку на видео\n"
-        "2. Отправь её мне\n"
-        "3. Получи видео\n\n"
-        "🔹 *Как создать изображение:*\n"
-        "1. Напиши /draw кот в космосе\n"
-        "2. Выбери стиль\n"
-        "3. Получи картинку через пару секунд\n\n"
-        "🔹 *Как использовать AI:*\n"
-        "• /ask Как придумать идею для видео?\n"
-        "• /ask Напиши текст про котиков\n"
-        "• Или просто отправь вопрос текстом!"
+        "🔹 *Основные команды:*\n"
+        "• `/start` — начало работы\n"
+        "• `/help` — эта справка\n"
+        "• `/profile` — твой профиль\n"
+        "• `/plan` — тарифы\n"
+        "• `/ref` — реферальная программа\n\n"
+        "🔹 *Генерация картинок:*\n"
+        "• `/draw кот в космосе` — создать картинку\n"
+        "• После команды выбери стиль\n"
+        "• Бесплатно: 2 картинки/день\n\n"
+        "🔹 *Скачивание видео:*\n"
+        "• Просто отправь ссылку на видео\n"
+        "• Поддерживаются: TikTok, Instagram, YouTube\n"
+        "• Бесплатно: 3 видео/день\n\n"
+        "🔹 *AI-помощник:*\n"
+        "• `/ask вопрос` — задай вопрос\n"
+        "• Бесплатно: 5 запросов/день"
     )
     
     if user_id == ADMIN_ID:
         text += "\n\n🔹 *Админ-команды:*\n"
-        text += "/stats — статистика\n"
-        text += "/whois — инфо о пользователе\n"
-        text += "/ban — заблокировать\n"
-        text += "/unban — разблокировать\n"
-        text += "/broadcast — рассылка\n"
-        text += "/setplan — выдать тариф\n"
-        text += "/addbonus — добавить бонус\n"
-        text += "/resetlimit — сбросить лимит\n"
-        text += "/backup — бэкап БД\n"
-        text += "/export — экспорт CSV\n"
-        text += "/ping — проверка\n"
-        text += "/restart — перезапуск"
+        text += "• `/stats` — статистика\n"
+        text += "• `/whois` — инфо о пользователе\n"
+        text += "• `/ban` / `/unban` — блокировка\n"
+        text += "• `/broadcast` — рассылка\n"
+        text += "• `/setplan` — выдать тариф\n"
+        text += "• `/addbonus` — добавить бонусы\n"
+        text += "• `/resetlimit` — сбросить лимиты\n"
+        text += "• `/backup` — бэкап БД\n"
+        text += "• `/export` — экспорт CSV\n"
+        text += "• `/ping` — проверка\n"
+        text += "• `/restart` — перезапуск"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -640,13 +715,13 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         f"👤 *Твой профиль*\n\n"
-        f"Тариф: {plan_name}\n"
-        f"Действует: {expiry_text}\n\n"
+        f"💎 *Тариф:* {plan_name}\n"
+        f"⏳ Действует: {expiry_text}\n\n"
         f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
         f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
-        f"🎨 *Изображения:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
-        f"👥 Рефералов: {refs}\n"
-        f"🎁 Бонусы: +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
+        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
+        f"👥 *Рефералов:* {refs}\n"
+        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
     )
     
     keyboard = [
@@ -675,8 +750,9 @@ async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for pid, plan in PLANS.items():
         if pid == 'basic':
             continue
-        text += f"{plan['name']}\n{plan['price']}★/мес\n"
-        text += "\n".join([f"• {f}" for f in plan['features']]) + "\n\n"
+        text += f"{plan['name']}\n"
+        text += f"💰 {plan['price']} ★ / месяц\n"
+        text += "▸ " + "\n▸ ".join(plan['features']) + "\n\n"
         if pid != current:
             keyboard.append([InlineKeyboardButton(f"✅ Купить {plan['name']}", callback_data=f"buy_{pid}")])
     
@@ -705,7 +781,8 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         f"👥 *Реферальная программа*\n\n"
-        f"🔗 *Твоя ссылка:*\n`{link}`\n\n"
+        f"🔗 *Твоя ссылка:*\n"
+        f"`{link}`\n\n"
         f"📊 *Статистика:*\n"
         f"• Приглашено друзей: {count}\n"
         f"• Бонус видео: +{bonus_d}/день\n"
@@ -715,7 +792,7 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"За каждого друга ты получаешь:\n"
         f"• +3 скачивания в день навсегда\n"
         f"• +2 AI-запроса в день навсегда\n"
-        f"• +1 генерацию картинок в день навсегда\n"
+        f"• +1 генерацию картинок в день навсегда\n\n"
         f"Друзья тоже получают бонусы на первый день!"
     )
     
@@ -754,8 +831,10 @@ async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan_id = payload.replace('sub_', '')
         update_user_plan(user_id, plan_id)
         await update.message.reply_text(
-            f"✅ Тариф {PLANS[plan_id]['name']} активирован на 30 дней!\n"
-            f"🤖 Теперь у тебя больше AI-запросов и генераций!"
+            f"✅ *Тариф активирован!*\n\n"
+            f"Тариф {PLANS[plan_id]['name']} активирован на 30 дней.\n"
+            f"Спасибо за поддержку! 🙏",
+            parse_mode='Markdown'
         )
 
 async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -793,13 +872,13 @@ async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         f"👤 *Твой профиль*\n\n"
-        f"Тариф: {PLANS[plan]['name']}\n"
-        f"Действует: {expiry_text}\n\n"
+        f"💎 *Тариф:* {PLANS[plan]['name']}\n"
+        f"⏳ Действует: {expiry_text}\n\n"
         f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
         f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
-        f"🎨 *Изображения:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
-        f"👥 Рефералов: {refs}\n"
-        f"🎁 Бонусы: +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
+        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
+        f"👥 *Рефералов:* {refs}\n"
+        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
     )
     
     keyboard = [
@@ -817,15 +896,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total, active, downloads, ai_requests, images, plans_stats = get_stats()
     
     text = f"📊 *Статистика*\n\n"
-    text += f"👥 Всего: {total}\n"
-    text += f"📱 Актив: {active}\n"
-    text += f"📥 Скачиваний: {downloads}\n"
-    text += f"🤖 AI-запросов: {ai_requests}\n"
-    text += f"🎨 Изображений: {images}\n\n"
-    text += f"💎 *Тарифы:*\n"
+    text += f"👥 *Всего пользователей:* {total}\n"
+    text += f"📱 *Активных сегодня:* {active}\n"
+    text += f"📥 *Всего скачиваний:* {downloads}\n"
+    text += f"🤖 *Всего AI-запросов:* {ai_requests}\n"
+    text += f"🎨 *Всего картинок:* {images}\n\n"
+    text += f"💎 *Распределение по тарифам:*\n"
     
     for plan, count in plans_stats:
-        text += f"{PLANS[plan]['name']}: {count}\n"
+        text += f"• {PLANS[plan]['name']}: {count}\n"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -865,26 +944,26 @@ async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = f"""👤 *Информация о пользователе*
 
-ID: `{user[0]}`
-Username: @{user[1] or 'нет'}
-Имя: {user[2]} {user[3] or ''}
-Первый вход: {user[4]}
-Последний вход: {user[5]}
+**ID:** `{user[0]}`
+**Username:** @{user[1] or 'нет'}
+**Имя:** {user[2]} {user[3] or ''}
+**Первый вход:** {user[4]}
+**Последний вход:** {user[5]}
 
 📊 *Статистика:*
-Тариф: {PLANS[user[12]]['name']}
-Видео сегодня: {user[6]}/{PLANS[user[12]]['download_limit'] + (user[20] or 0)}
-AI сегодня: {user[7]}/{PLANS[user[12]]['ai_limit'] + (user[21] or 0)}
-Картинки сегодня: {user[8]}/{PLANS[user[12]]['image_limit'] + (user[22] or 0)}
-Всего видео: {user[14]}
-Всего AI: {user[15]}
-Всего картинок: {user[16]}
-Рефералов: {user[18]}
-Бонус видео: +{user[20] or 0}/день
-Бонус AI: +{user[21] or 0}/день
-Бонус картинок: +{user[22] or 0}/день
+**Тариф:** {PLANS[user[12]]['name']}
+**Видео сегодня:** {user[6]}/{PLANS[user[12]]['download_limit'] + (user[20] or 0)}
+**AI сегодня:** {user[7]}/{PLANS[user[12]]['ai_limit'] + (user[21] or 0)}
+**Картинки сегодня:** {user[8]}/{PLANS[user[12]]['image_limit'] + (user[22] or 0)}
+**Всего видео:** {user[14]}
+**Всего AI:** {user[15]}
+**Всего картинок:** {user[16]}
+**Рефералов:** {user[18]}
+**Бонус видео:** +{user[20] or 0}/день
+**Бонус AI:** +{user[21] or 0}/день
+**Бонус картинок:** +{user[22] or 0}/день
 
-{'🔴 ЗАБЛОКИРОВАН' if user[23] == 1 else '🟢 Активен'}"""
+{'🔴 **ЗАБЛОКИРОВАН**' if user[23] == 1 else '🟢 **Активен**'}"""
     
     conn.close()
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -1141,10 +1220,12 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not query:
         await update.message.reply_text(
-            "❓ Напиши свой вопрос после /ask\n\n"
-            "Примеры:\n"
-            "/ask Как придумать идею для TikTok?\n"
-            "/ask Напиши текст про путешествия"
+            "❓ *Как задать вопрос:*\n\n"
+            "Просто напиши:\n"
+            "`/ask как придумать идею для видео?`\n"
+            "`/ask напиши текст для TikTok`\n"
+            "`/ask какие тренды сейчас?`",
+            parse_mode='Markdown'
         )
         return
     
@@ -1177,8 +1258,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         can, left = check_download_limit(user_id)
         if not can:
             await update.message.reply_text(
-                "❌ Ты исчерпал лимит скачиваний на сегодня.\n"
-                "Купи подписку /plan или приведи друзей /ref для увеличения лимита!"
+                "❌ *Лимит скачиваний исчерпан*\n\n"
+                f"Ты использовал все скачивания на сегодня.\n"
+                f"Купи подписку /plan или приведи друзей /ref для увеличения лимита!",
+                parse_mode='Markdown'
             )
             return
         
@@ -1225,8 +1308,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         can, left = check_ai_limit(user_id)
         if not can:
             await update.message.reply_text(
-                "❌ Ты исчерпал лимит AI-запросов на сегодня.\n"
-                "Купи подписку /plan или приведи друзей /ref для увеличения лимита!"
+                "❌ *Лимит AI-запросов исчерпан*\n\n"
+                f"Ты использовал все запросы на сегодня.\n"
+                f"Купи подписку /plan или приведи друзей /ref для увеличения лимита!",
+                parse_mode='Markdown'
             )
             return
         
@@ -1278,7 +1363,7 @@ def main():
     # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот с генерацией изображений запущен")
+    logger.info("✅ Бот с улучшенной генерацией изображений запущен")
     app.run_polling()
 
 if __name__ == '__main__':
