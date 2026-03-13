@@ -33,8 +33,14 @@ if not BOT_TOKEN:
 # Твой Telegram ID (админ)
 ADMIN_ID = 920343231  # ТВОЙ ID
 
+# ========== ПРОВЕРКА КЛЮЧА OPENROUTER ==========
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
+if OPENROUTER_API_KEY:
+    logger.info(f"✅ КЛЮЧ OPENROUTER НАЙДЕН! Первые символы: {OPENROUTER_API_KEY[:10]}...")
+else:
+    logger.error("❌ КЛЮЧ OPENROUTER НЕ НАЙДЕН в переменных окружения! AI-ассистент не будет работать.")
+
 # ========== НАСТРОЙКИ API ==========
-# Для генерации изображений (бесплатные API без ключей)
 POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
 POLLINATIONS_FALLBACK = "https://pollinations.ai/p/"
 
@@ -44,13 +50,6 @@ IMAGE_STYLES = {
     'artistic': 'художественный стиль, арт, креативно, абстрактно',
     'cartoon': 'мультяшный стиль, анимация, яркие цвета, дисней',
     'sketch': 'скетч, набросок карандашом, черно-белый, эскиз'
-}
-
-# Лимиты генерации для разных тарифов
-IMAGE_LIMITS = {
-    'basic': 2,      # 2 генерации в день
-    'starter': 20,    # 20 генераций в день
-    'premium': 999999  # безлимитно
 }
 
 # ========== НАСТРОЙКИ СКАЧИВАНИЯ ==========
@@ -130,7 +129,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    logger.info("✅ База данных создана с Image-колонками")
+    logger.info("✅ База данных создана")
 
 def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -197,7 +196,6 @@ def check_ai_limit(user_id):
     return today < limit, limit - today
 
 def check_image_limit(user_id):
-    """Проверка лимита генерации изображений"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT plan, image_generations_today, bonus_images FROM users WHERE user_id = ?", (user_id,))
@@ -246,7 +244,6 @@ def increment_ai_request(user_id):
     conn.close()
 
 def increment_image_generation(user_id):
-    """Увеличить счетчик генераций изображений"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -336,93 +333,60 @@ def get_stats():
     return total, active, downloads, ai_requests, images, plans_stats
 
 # ========== ФУНКЦИИ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ==========
-
 async def generate_image(prompt, style='realistic', max_retries=3):
     """Генерация изображения с запасными API и повторными попытками"""
     try:
-        # Добавляем стиль к промпту
         style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
         encoded_prompt = urllib.parse.quote(style_prompt)
         
-        # Список API для попыток (если первый не работает, пробуем следующие)
         apis = [
-            # Основной API Pollinations
             f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux",
-            # Запасной вариант с другим эндпоинтом
             f"{POLLINATIONS_FALLBACK}{encoded_prompt}?width=1024&height=1024&model=flux",
-            # Еще один вариант с другой моделью
             f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&model=turbo",
-            # Без логотипа, другой формат
             f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=any"
         ]
         
         for attempt in range(max_retries):
             for api_url in apis:
                 try:
-                    logger.info(f"Попытка генерации {attempt+1}/{max_retries}, API: {api_url[:50]}...")
-                    
                     async with aiohttp.ClientSession() as session:
                         async with session.get(api_url, timeout=30) as resp:
                             if resp.status == 200:
                                 image_data = await resp.read()
-                                # Проверяем, что данные не пустые (минимальный размер PNG)
                                 if len(image_data) > 1000:
-                                    logger.info(f"✅ Успешная генерация с API: {api_url[:50]}...")
                                     return image_data
-                                else:
-                                    logger.warning(f"API вернул слишком маленький файл: {len(image_data)} bytes")
-                            else:
-                                logger.warning(f"API {api_url[:50]}... вернул статус {resp.status}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"Таймаут при запросе к {api_url[:50]}...")
-                except Exception as e:
-                    logger.warning(f"Ошибка при запросе к {api_url[:50]}...: {e}")
-                
-                # Небольшая пауза между запросами к разным API
+                except:
+                    continue
                 await asyncio.sleep(1)
             
-            # Если все API не сработали, ждем перед повторной попыткой
             if attempt < max_retries - 1:
-                wait_time = 3 * (attempt + 1)
-                logger.info(f"Повторная попытка через {wait_time} секунд...")
-                await asyncio.sleep(wait_time)
+                await asyncio.sleep(3 * (attempt + 1))
         
-        logger.error("Все API и попытки исчерпаны")
         return None
-        
     except Exception as e:
-        logger.error(f"Критическая ошибка генерации: {e}")
+        logger.error(f"Image generation error: {e}")
         return None
 
 async def generate_image_with_style_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает меню выбора стиля перед генерацией"""
-    query = update.callback_query
-    if query:
+    if update.callback_query:
+        query = update.callback_query
         await query.answer()
         prompt = context.user_data.get('pending_prompt', '')
         msg = query.message
-        edit = True
     else:
         prompt = ' '.join(context.args) if context.args else None
         msg = update.message
-        edit = False
     
     if not prompt:
         await msg.reply_text(
-            "❓ *Как пользоваться генерацией:*\n\n"
-            "Просто напиши:\n"
-            "`/draw кот в космосе`\n"
-            "`/draw футуристический город`\n"
-            "`/draw девушка с зонтиком`\n\n"
-            "Я предложу выбрать стиль и создам картинку!",
+            "❓ Использование: /draw <описание>\n\nПримеры:\n/draw кот в космосе\n/draw футуристический город",
             parse_mode='Markdown'
         )
         return
     
-    # Сохраняем промпт в контексте
     context.user_data['pending_prompt'] = prompt
     
-    # Создаем клавиатуру с выбором стиля
     keyboard = [
         [InlineKeyboardButton("📸 Фотореализм", callback_data="style_realistic")],
         [InlineKeyboardButton("🎨 Арт", callback_data="style_artistic")],
@@ -433,8 +397,7 @@ async def generate_image_with_style_selection(update: Update, context: ContextTy
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await msg.reply_text(
-        f"🎨 *Выбери стиль для:*\n\n"
-        f"«{prompt}»",
+        f"🎨 *Выбери стиль для:*\n\n«{prompt}»",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -446,160 +409,134 @@ async def generate_image_callback(update: Update, context: ContextTypes.DEFAULT_
     
     user = update.effective_user
     user_id = user.id
-    
-    # Получаем промпт из контекста
     prompt = context.user_data.get('pending_prompt', '')
+    
     if not prompt:
-        await query.edit_message_text(
-            "❌ Ошибка: промпт не найден. Попробуй /draw заново."
-        )
+        await query.edit_message_text("❌ Ошибка: промпт не найден. Попробуй /draw заново.")
         return
     
-    # Определяем стиль
     style = query.data.replace('style_', '')
-    if style == 'none':
-        style_display = "без стиля"
-    else:
-        style_display = style
     
-    # Проверяем лимит
     can, left = check_image_limit(user_id)
     if not can:
         await query.edit_message_text(
-            "❌ *Лимит исчерпан*\n\n"
-            f"Ты использовал все генерации на сегодня.\n"
-            f"Купи подписку /plan или приведи друзей /ref для увеличения лимита!",
+            "❌ *Лимит исчерпан*\n\nКупи подписку /plan или приведи друзей /ref для увеличения лимита!",
             parse_mode='Markdown'
         )
         return
     
-    # Сообщение о начале генерации
     status_msg = await query.edit_message_text(
-        f"🎨 *Генерирую...*\n\n"
-        f"«{prompt}»\n"
-        f"Стиль: {style_display}\n\n"
-        f"⏳ Это займет несколько секунд",
+        f"🎨 *Генерирую...*\n\n«{prompt}»\n⏳ Это займет несколько секунд",
         parse_mode='Markdown'
     )
     
-    # Пробуем сгенерировать
     image_data = await generate_image(prompt, style if style != 'none' else 'realistic')
     
     if not image_data:
-        # Если не удалось сгенерировать, предлагаем креативные варианты
-        creative_prompts = [
-            f"котик в стиле {style_display}",
-            f"фантастический пейзаж, {style_display}",
-            f"красивый закат, {style_display}"
-        ]
-        random_prompt = random.choice(creative_prompts)
-        
         await status_msg.edit_text(
-            f"⚠️ *Не удалось сгенерировать*\n\n"
-            f"Сервис генерации временно перегружен.\n\n"
-            f"🎯 *Попробуй другой запрос:*\n"
-            f"`/draw {random_prompt}`\n\n"
-            f"или повтори через несколько минут.",
+            f"⚠️ *Не удалось сгенерировать*\n\nСервис временно перегружен. Попробуй позже.",
             parse_mode='Markdown'
         )
         return
     
     try:
-        # Отправляем изображение
         await context.bot.send_photo(
             chat_id=user_id,
             photo=BytesIO(image_data),
-            caption=f"🖼️ *Готово!*\n\n"
-                    f"«{prompt}»\n"
-                    f"✨ Стиль: {style_display}",
+            caption=f"🖼️ *Готово!*\n\n«{prompt}»",
             parse_mode='Markdown'
         )
         
-        # Увеличиваем счетчик
         increment_image_generation(user_id)
-        
-        # Удаляем сообщение с прогрессом
         await status_msg.delete()
         
-        # Проверяем остаток
-        _, left = check_image_limit(user_id)
-        if left < 3:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"⚠️ У тебя осталось {left} генераций сегодня.\n"
-                     f"Приведи друга /ref, чтобы получить больше!"
-            )
-            
     except Exception as e:
-        logger.error(f"Ошибка отправки изображения: {e}")
-        await status_msg.edit_text("❌ Ошибка при отправке. Попробуй еще раз.")
+        logger.error(f"Ошибка отправки: {e}")
+        await status_msg.edit_text("❌ Ошибка при отправке.")
 
 # ========== AI-ФУНКЦИИ ==========
 async def ask_ai(prompt, user_id, model_type='chat'):
-    """Запрос к AI"""
+    """Запрос к AI через OpenRouter"""
+    
     can, left = check_ai_limit(user_id)
     if not can:
         return "❌ Ты исчерпал лимит AI-запросов на сегодня. Купи подписку /plan или приведи друзей /ref для увеличения лимита!"
     
-    # Здесь можно подключить любой AI API
-    # Пока возвращаем заглушку
-    increment_ai_request(user_id)
+    api_key = os.environ.get('OPENROUTER_API_KEY')
     
-    # Простые ответы на частые вопросы
-    responses = {
-        'привет': "👋 Привет! Чем могу помочь?",
-        'как дела': "🤖 У меня всё отлично! Готов помогать с видео и картинками!",
-        'что ты умеешь': "🎨 Я умею:\n• Скачивать видео из соцсетей\n• Генерировать картинки по тексту\n• Отвечать на вопросы\n• Помогать с идеями для контента"
+    # 🔍 ДИАГНОСТИКА
+    logger.info(f"Получен запрос от пользователя {user_id}: {prompt[:50]}...")
+    
+    if not api_key:
+        logger.error("OPENROUTER_API_KEY не найден в переменных окружения!")
+        return "❌ API-ключ OpenRouter не настроен. Обратись к администратору."
+    
+    logger.info(f"Ключ найден, первые символы: {api_key[:10]}...")
+    
+    free_models = {
+        'chat': 'google/gemini-2.0-flash-exp:free',
+        'creative': 'google/gemini-1.5-flash:free',
+        'fast': 'meta-llama/llama-3.2-3b-instruct:free'
     }
     
-    # Проверяем на частые вопросы
-    for key in responses:
-        if key in prompt.lower():
-            return responses[key]
+    model = free_models.get(model_type, free_models['chat'])
+    logger.info(f"Используемая модель: {model}")
     
-    return f"🤖 *AI-ассистент:*\n\nЯ получил твой запрос: '{prompt}'\n\n(Для полноценного AI нужно подключить API)"
-
-# ========== СКАЧИВАНИЕ ВИДЕО ==========
-async def download_video(url):
+    system_prompt = """Ты AI-ассистент бота TikTokSavebot. Помогаешь с идеями для видео, текстами, хештегами, советами по продвижению. Отвечай кратко, по делу, на том же языке, что и пользователь."""
+    
     try:
-        ydl_opts = {
-            **YDL_OPTIONS,
-            'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s_%(id)s.%(ext)s'),
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            return filename if os.path.exists(filename) else None
+        async with aiohttp.ClientSession() as session:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://t.me/TikTokSavebot",
+                "X-Title": "TikTokSavebot"
+            }
+            
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
+            
+            logger.info(f"Отправка запроса к OpenRouter")
+            
+            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                logger.info(f"Статус ответа: {resp.status}")
+                
+                if resp.status == 200:
+                    data = await resp.json()
+                    if 'choices' in data and len(data['choices']) > 0:
+                        result = data['choices'][0]['message']['content']
+                        increment_ai_request(user_id)
+                        logger.info("✅ Успешный ответ от OpenRouter")
+                        return result
+                    else:
+                        logger.error(f"Неожиданный ответ: {data}")
+                        return "❌ Неожиданный ответ от API."
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"Ошибка {resp.status}: {error_text}")
+                    
+                    if resp.status == 402:
+                        return "❌ Бесплатные лимиты OpenRouter исчерпаны."
+                    elif resp.status == 401:
+                        return "❌ Неверный API-ключ. Проверь настройки."
+                    else:
+                        return f"❌ Ошибка API (код {resp.status})."
+    
+    except asyncio.TimeoutError:
+        logger.error("Timeout")
+        return "❌ Превышено время ожидания."
     except Exception as e:
-        logger.error(f"Ошибка скачивания: {e}")
-        return None
-
-async def analyze_video_url(url):
-    """Анализ ссылки на видео"""
-    try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Название не найдено')
-            duration = info.get('duration', 0)
-            uploader = info.get('uploader', 'Неизвестный автор')
-            
-            minutes = duration // 60
-            seconds = duration % 60
-            
-            return f"""📹 *Информация о видео*
-
-**Название:** {title}
-**Автор:** {uploader}
-**Длительность:** {minutes}:{seconds:02d}
-
-Хочешь скачать? Просто отправь ссылку еще раз!"""
-    except:
-        return None
+        logger.error(f"Ошибка: {e}")
+        return "❌ Ошибка при обращении к AI."
 
 # ========== ОСНОВНЫЕ КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,28 +550,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         referrer = process_referral(user.id, ref_code)
         if referrer:
             await update.message.reply_text(
-                "🎉 *Ты пришел по ссылке друга!*\n\n"
-                "✨ Ты получил +3 скачивания на сегодня!\n"
-                "🤖 А твой друг получил бонусы навсегда!",
+                "🎉 *Ты пришел по ссылке друга!*\n\n✨ Ты получил +3 скачивания на сегодня!",
                 parse_mode='Markdown'
             )
     
     text = (
-        "🎬 *TikTokSavebot — Скачивай, общайся и твори*\n\n"
-        "📥 *Скачивание видео:*\n"
-        "• TikTok • Instagram • YouTube\n"
-        "Просто отправь ссылку!\n\n"
-        "🎨 *Генерация изображений:*\n"
-        "• `/draw кот в космосе` — создать картинку\n\n"
-        "🤖 *AI-ассистент:*\n"
-        "• `/ask вопрос` — задай вопрос\n\n"
-        "📋 *Команды:*\n"
-        "• /draw — создать картинку\n"
-        "• /ask — спросить AI\n"
-        "• /plan — тарифы\n"
-        "• /profile — профиль\n"
-        "• /ref — рефералы (получи бонусы)\n"
-        "• /help — помощь"
+        "🎬 *TikTokSavebot*\n\n"
+        "📥 *Скачивание видео:* просто отправь ссылку\n"
+        "🎨 *Генерация картинок:* /draw описание\n"
+        "🤖 *AI-ассистент:* /ask вопрос или просто текст\n"
+        "📋 /plan — тарифы\n"
+        "/profile — профиль\n"
+        "/ref — рефералы\n"
+        "/help — помощь"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -644,248 +572,55 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *Помощь*\n\n"
         "🔹 *Основные команды:*\n"
-        "• `/start` — начало работы\n"
-        "• `/help` — эта справка\n"
-        "• `/profile` — твой профиль\n"
-        "• `/plan` — тарифы\n"
-        "• `/ref` — реферальная программа\n\n"
+        "/start — начало\n"
+        "/help — эта справка\n"
+        "/profile — твой профиль\n"
+        "/plan — тарифы\n"
+        "/ref — рефералы\n\n"
         "🔹 *Генерация картинок:*\n"
-        "• `/draw кот в космосе` — создать картинку\n"
-        "• После команды выбери стиль\n"
-        "• Бесплатно: 2 картинки/день\n\n"
+        "/draw кот в космосе — создать картинку\n\n"
+        "🔹 *AI-ассистент:*\n"
+        "/ask вопрос — задай вопрос\n"
+        "Или просто отправь текст\n\n"
         "🔹 *Скачивание видео:*\n"
-        "• Просто отправь ссылку на видео\n"
-        "• Поддерживаются: TikTok, Instagram, YouTube\n"
-        "• Бесплатно: 3 видео/день\n\n"
-        "🔹 *AI-помощник:*\n"
-        "• `/ask вопрос` — задай вопрос\n"
-        "• Бесплатно: 5 запросов/день"
+        "Отправь ссылку на видео из TikTok, Instagram, YouTube"
     )
     
     if user_id == ADMIN_ID:
         text += "\n\n🔹 *Админ-команды:*\n"
-        text += "• `/stats` — статистика\n"
-        text += "• `/whois` — инфо о пользователе\n"
-        text += "• `/ban` / `/unban` — блокировка\n"
-        text += "• `/broadcast` — рассылка\n"
-        text += "• `/setplan` — выдать тариф\n"
-        text += "• `/addbonus` — добавить бонусы\n"
-        text += "• `/resetlimit` — сбросить лимиты\n"
-        text += "• `/backup` — бэкап БД\n"
-        text += "• `/export` — экспорт CSV\n"
-        text += "• `/ping` — проверка\n"
-        text += "• `/restart` — перезапуск"
+        text += "/stats — статистика\n"
+        text += "/whois — инфо о пользователе\n"
+        text += "/ban /unban — блокировка\n"
+        text += "/broadcast — рассылка\n"
+        text += "/setplan — выдать тариф\n"
+        text += "/addbonus — добавить бонусы\n"
+        text += "/resetlimit — сбросить лимиты\n"
+        text += "/backup — бэкап\n"
+        text += "/export — экспорт CSV\n"
+        text += "/ping — проверка\n"
+        text += "/restart — перезапуск"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
-async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для AI-запросов"""
     user = update.effective_user
     user_id = user.id
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
-    plan, expiry = get_user_plan(user_id)
-    plan_name = PLANS[plan]['name']
+    query = ' '.join(context.args) if context.args else None
     
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''SELECT downloads_today, ai_requests_today, image_generations_today,
-                 total_downloads, total_ai_requests, total_images,
-                 bonus_downloads, bonus_ai, bonus_images, referral_count 
-                 FROM users WHERE user_id = ?''', (user_id,))
-    data = c.fetchone()
-    conn.close()
-    
-    today_d = data[0] if data else 0
-    today_ai = data[1] if data else 0
-    today_img = data[2] if data else 0
-    total_d = data[3] if data else 0
-    total_ai = data[4] if data else 0
-    total_img = data[5] if data else 0
-    bonus_d = data[6] if data else 0
-    bonus_ai = data[7] if data else 0
-    bonus_img = data[8] if data else 0
-    refs = data[9] if data else 0
-    
-    d_limit = PLANS[plan]['download_limit'] + bonus_d
-    ai_limit = PLANS[plan]['ai_limit'] + bonus_ai
-    img_limit = PLANS[plan]['image_limit'] + bonus_img
-    
-    expiry_text = f"до {expiry}" if expiry else "бессрочно"
-    
-    text = (
-        f"👤 *Твой профиль*\n\n"
-        f"💎 *Тариф:* {plan_name}\n"
-        f"⏳ Действует: {expiry_text}\n\n"
-        f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
-        f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
-        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
-        f"👥 *Рефералов:* {refs}\n"
-        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
-        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
-    ]
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        msg = query.message
-        edit = True
-    else:
-        user_id = update.effective_user.id
-        msg = update.message
-        edit = False
-    
-    current, _ = get_user_plan(user_id)
-    
-    text = "💎 *Тарифы*\n\n"
-    keyboard = []
-    
-    for pid, plan in PLANS.items():
-        if pid == 'basic':
-            continue
-        text += f"{plan['name']}\n"
-        text += f"💰 {plan['price']} ★ / месяц\n"
-        text += "▸ " + "\n▸ ".join(plan['features']) + "\n\n"
-        if pid != current:
-            keyboard.append([InlineKeyboardButton(f"✅ Купить {plan['name']}", callback_data=f"buy_{pid}")])
-    
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_profile")])
-    
-    if edit:
-        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        msg = query.message
-        edit = True
-    else:
-        user_id = update.effective_user.id
-        msg = update.message
-        edit = False
-    
-    code, count, bonus_d, bonus_ai, bonus_img = get_referral_info(user_id)
-    bot_username = (await context.bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start=ref_{code}"
-    
-    text = (
-        f"👥 *Реферальная программа*\n\n"
-        f"🔗 *Твоя ссылка:*\n"
-        f"`{link}`\n\n"
-        f"📊 *Статистика:*\n"
-        f"• Приглашено друзей: {count}\n"
-        f"• Бонус видео: +{bonus_d}/день\n"
-        f"• Бонус AI: +{bonus_ai}/день\n"
-        f"• Бонус картинок: +{bonus_img}/день\n\n"
-        f"🎁 *Как это работает:*\n"
-        f"За каждого друга ты получаешь:\n"
-        f"• +3 скачивания в день навсегда\n"
-        f"• +2 AI-запроса в день навсегда\n"
-        f"• +1 генерацию картинок в день навсегда\n\n"
-        f"Друзья тоже получают бонусы на первый день!"
-    )
-    
-    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_profile")]]
-    
-    if edit:
-        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    plan_id = query.data.replace('buy_', '')
-    plan = PLANS[plan_id]
-    
-    await context.bot.send_invoice(
-        chat_id=query.from_user.id,
-        title=plan['name'],
-        description=", ".join(plan['features']),
-        payload=f"sub_{plan_id}",
-        provider_token="",
-        currency="XTR",
-        prices=[{"label": plan['name'], "amount": plan['price']}]
-    )
-
-async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
-async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    payload = update.message.successful_payment.invoice_payload
-    
-    if payload.startswith('sub_'):
-        plan_id = payload.replace('sub_', '')
-        update_user_plan(user_id, plan_id)
+    if not query:
         await update.message.reply_text(
-            f"✅ *Тариф активирован!*\n\n"
-            f"Тариф {PLANS[plan_id]['name']} активирован на 30 дней.\n"
-            f"Спасибо за поддержку! 🙏",
+            "❓ Напиши вопрос после /ask\n\nПример: /ask как придумать идею для видео?",
             parse_mode='Markdown'
         )
-
-async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+        return
     
-    user_id = query.from_user.id
-    plan, expiry = get_user_plan(user_id)
-    
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''SELECT downloads_today, ai_requests_today, image_generations_today,
-                 total_downloads, total_ai_requests, total_images,
-                 bonus_downloads, bonus_ai, bonus_images, referral_count 
-                 FROM users WHERE user_id = ?''', (user_id,))
-    data = c.fetchone()
-    conn.close()
-    
-    today_d = data[0] if data else 0
-    today_ai = data[1] if data else 0
-    today_img = data[2] if data else 0
-    total_d = data[3] if data else 0
-    total_ai = data[4] if data else 0
-    total_img = data[5] if data else 0
-    bonus_d = data[6] if data else 0
-    bonus_ai = data[7] if data else 0
-    bonus_img = data[8] if data else 0
-    refs = data[9] if data else 0
-    
-    d_limit = PLANS[plan]['download_limit'] + bonus_d
-    ai_limit = PLANS[plan]['ai_limit'] + bonus_ai
-    img_limit = PLANS[plan]['image_limit'] + bonus_img
-    
-    expiry_text = f"до {expiry}" if expiry else "бессрочно"
-    
-    text = (
-        f"👤 *Твой профиль*\n\n"
-        f"💎 *Тариф:* {PLANS[plan]['name']}\n"
-        f"⏳ Действует: {expiry_text}\n\n"
-        f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
-        f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
-        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
-        f"👥 *Рефералов:* {refs}\n"
-        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
-        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
-    ]
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    status_msg = await update.message.reply_text("🤔 Думаю...")
+    response = await ask_ai(query, user_id)
+    await status_msg.edit_text(f"🤖 *AI-ассистент:*\n\n{response}", parse_mode='Markdown')
 
 # ========== АДМИН-КОМАНДЫ ==========
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -896,15 +631,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total, active, downloads, ai_requests, images, plans_stats = get_stats()
     
     text = f"📊 *Статистика*\n\n"
-    text += f"👥 *Всего пользователей:* {total}\n"
-    text += f"📱 *Активных сегодня:* {active}\n"
-    text += f"📥 *Всего скачиваний:* {downloads}\n"
-    text += f"🤖 *Всего AI-запросов:* {ai_requests}\n"
-    text += f"🎨 *Всего картинок:* {images}\n\n"
-    text += f"💎 *Распределение по тарифам:*\n"
+    text += f"👥 Всего: {total}\n"
+    text += f"📱 Актив: {active}\n"
+    text += f"📥 Скачиваний: {downloads}\n"
+    text += f"🤖 AI-запросов: {ai_requests}\n"
+    text += f"🎨 Картинок: {images}\n\n"
+    text += f"💎 *Тарифы:*\n"
     
     for plan, count in plans_stats:
-        text += f"• {PLANS[plan]['name']}: {count}\n"
+        text += f"{PLANS[plan]['name']}: {count}\n"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -944,26 +679,24 @@ async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = f"""👤 *Информация о пользователе*
 
-**ID:** `{user[0]}`
-**Username:** @{user[1] or 'нет'}
-**Имя:** {user[2]} {user[3] or ''}
-**Первый вход:** {user[4]}
-**Последний вход:** {user[5]}
+ID: `{user[0]}`
+Username: @{user[1] or 'нет'}
+Имя: {user[2]} {user[3] or ''}
+Первый вход: {user[4]}
+Последний вход: {user[5]}
 
 📊 *Статистика:*
-**Тариф:** {PLANS[user[12]]['name']}
-**Видео сегодня:** {user[6]}/{PLANS[user[12]]['download_limit'] + (user[20] or 0)}
-**AI сегодня:** {user[7]}/{PLANS[user[12]]['ai_limit'] + (user[21] or 0)}
-**Картинки сегодня:** {user[8]}/{PLANS[user[12]]['image_limit'] + (user[22] or 0)}
-**Всего видео:** {user[14]}
-**Всего AI:** {user[15]}
-**Всего картинок:** {user[16]}
-**Рефералов:** {user[18]}
-**Бонус видео:** +{user[20] or 0}/день
-**Бонус AI:** +{user[21] or 0}/день
-**Бонус картинок:** +{user[22] or 0}/день
+Тариф: {PLANS[user[12]]['name']}
+Видео сегодня: {user[6]}
+AI сегодня: {user[7]}
+Картинки сегодня: {user[8]}
+Всего видео: {user[14]}
+Всего AI: {user[15]}
+Всего картинок: {user[16]}
+Рефералов: {user[18]}
+Бонусы: +{user[20]} видео, +{user[21]} AI, +{user[22]} картинок/день
 
-{'🔴 **ЗАБЛОКИРОВАН**' if user[23] == 1 else '🟢 **Активен**'}"""
+{'🔴 ЗАБЛОКИРОВАН' if user[23] == 1 else '🟢 Активен'}"""
     
     conn.close()
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -1023,7 +756,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = ' '.join(context.args)
     if not text:
-        await update.message.reply_text("Использование: /broadcast <текст сообщения>")
+        await update.message.reply_text("Использование: /broadcast <текст>")
         return
     
     await update.message.reply_text("📢 Начинаю рассылку...")
@@ -1046,7 +779,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             sent += 1
             await asyncio.sleep(0.05)
-        except Exception as e:
+        except:
             failed += 1
     
     await update.message.reply_text(f"✅ Рассылка завершена\nОтправлено: {sent}\nОшибок: {failed}")
@@ -1082,7 +815,7 @@ async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     args = context.args
     if len(args) < 4:
-        await update.message.reply_text("Использование: /addbonus <user_id> <video_bonus> <ai_bonus> <image_bonus>")
+        await update.message.reply_text("Использование: /addbonus <user_id> <video> <ai> <image>")
         return
     
     try:
@@ -1151,7 +884,7 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(backup_path)
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка создания бэкапа: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -1187,7 +920,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(csv_path)
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка экспорта: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -1209,29 +942,256 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Перезапуск по команде админа")
     os._exit(0)
 
-async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для AI-запросов"""
+# ========== ПРОФИЛЬ И ТАРИФЫ ==========
+async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
-    query = ' '.join(context.args) if context.args else None
+    plan, expiry = get_user_plan(user_id)
+    plan_name = PLANS[plan]['name']
     
-    if not query:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT downloads_today, ai_requests_today, image_generations_today,
+                 total_downloads, total_ai_requests, total_images,
+                 bonus_downloads, bonus_ai, bonus_images, referral_count 
+                 FROM users WHERE user_id = ?''', (user_id,))
+    data = c.fetchone()
+    conn.close()
+    
+    today_d = data[0] if data else 0
+    today_ai = data[1] if data else 0
+    today_img = data[2] if data else 0
+    total_d = data[3] if data else 0
+    total_ai = data[4] if data else 0
+    total_img = data[5] if data else 0
+    bonus_d = data[6] if data else 0
+    bonus_ai = data[7] if data else 0
+    bonus_img = data[8] if data else 0
+    refs = data[9] if data else 0
+    
+    d_limit = PLANS[plan]['download_limit'] + bonus_d
+    ai_limit = PLANS[plan]['ai_limit'] + bonus_ai
+    img_limit = PLANS[plan]['image_limit'] + bonus_img
+    
+    expiry_text = f"до {expiry}" if expiry else "бессрочно"
+    
+    text = (
+        f"👤 *Твой профиль*\n\n"
+        f"💎 *Тариф:* {plan_name}\n"
+        f"⏳ Действует: {expiry_text}\n\n"
+        f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
+        f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
+        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
+        f"👥 *Рефералов:* {refs}\n"
+        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
+        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        msg = query.message
+        edit = True
+    else:
+        user_id = update.effective_user.id
+        msg = update.message
+        edit = False
+    
+    current, _ = get_user_plan(user_id)
+    
+    text = "💎 *Тарифы*\n\n"
+    keyboard = []
+    
+    for pid, plan in PLANS.items():
+        if pid == 'basic':
+            continue
+        text += f"{plan['name']}\n"
+        text += f"💰 {plan['price']} ★ / месяц\n"
+        text += "▸ " + "\n▸ ".join(plan['features']) + "\n\n"
+        if pid != current:
+            keyboard.append([InlineKeyboardButton(f"✅ Купить {plan['name']}", callback_data=f"buy_{pid}")])
+    
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_profile")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if edit:
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await msg.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        msg = query.message
+        edit = True
+    else:
+        user_id = update.effective_user.id
+        msg = update.message
+        edit = False
+    
+    code, count, bonus_d, bonus_ai, bonus_img = get_referral_info(user_id)
+    bot_username = (await context.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start=ref_{code}"
+    
+    text = (
+        f"👥 *Реферальная программа*\n\n"
+        f"🔗 *Твоя ссылка:*\n`{link}`\n\n"
+        f"📊 *Статистика:*\n"
+        f"• Приглашено друзей: {count}\n"
+        f"• Бонус видео: +{bonus_d}/день\n"
+        f"• Бонус AI: +{bonus_ai}/день\n"
+        f"• Бонус картинок: +{bonus_img}/день\n\n"
+        f"🎁 *Как это работает:*\n"
+        f"За каждого друга ты получаешь:\n"
+        f"• +3 скачивания в день навсегда\n"
+        f"• +2 AI-запроса в день навсегда\n"
+        f"• +1 генерацию картинок в день навсегда"
+    )
+    
+    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_profile")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if edit:
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await msg.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    plan_id = query.data.replace('buy_', '')
+    plan = PLANS[plan_id]
+    
+    await context.bot.send_invoice(
+        chat_id=query.from_user.id,
+        title=plan['name'],
+        description=", ".join(plan['features']),
+        payload=f"sub_{plan_id}",
+        provider_token="",
+        currency="XTR",
+        prices=[{"label": plan['name'], "amount": plan['price']}]
+    )
+
+async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.pre_checkout_query.answer(ok=True)
+
+async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    payload = update.message.successful_payment.invoice_payload
+    
+    if payload.startswith('sub_'):
+        plan_id = payload.replace('sub_', '')
+        update_user_plan(user_id, plan_id)
         await update.message.reply_text(
-            "❓ *Как задать вопрос:*\n\n"
-            "Просто напиши:\n"
-            "`/ask как придумать идею для видео?`\n"
-            "`/ask напиши текст для TikTok`\n"
-            "`/ask какие тренды сейчас?`",
+            f"✅ *Тариф активирован!*\n\nТариф {PLANS[plan_id]['name']} активирован на 30 дней.",
             parse_mode='Markdown'
         )
-        return
+
+async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    status_msg = await update.message.reply_text("🤔 Думаю...")
-    response = await ask_ai(query, user_id)
-    await status_msg.edit_text(response, parse_mode='Markdown')
+    user_id = query.from_user.id
+    plan, expiry = get_user_plan(user_id)
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT downloads_today, ai_requests_today, image_generations_today,
+                 total_downloads, total_ai_requests, total_images,
+                 bonus_downloads, bonus_ai, bonus_images, referral_count 
+                 FROM users WHERE user_id = ?''', (user_id,))
+    data = c.fetchone()
+    conn.close()
+    
+    today_d = data[0] if data else 0
+    today_ai = data[1] if data else 0
+    today_img = data[2] if data else 0
+    total_d = data[3] if data else 0
+    total_ai = data[4] if data else 0
+    total_img = data[5] if data else 0
+    bonus_d = data[6] if data else 0
+    bonus_ai = data[7] if data else 0
+    bonus_img = data[8] if data else 0
+    refs = data[9] if data else 0
+    
+    d_limit = PLANS[plan]['download_limit'] + bonus_d
+    ai_limit = PLANS[plan]['ai_limit'] + bonus_ai
+    img_limit = PLANS[plan]['image_limit'] + bonus_img
+    
+    expiry_text = f"до {expiry}" if expiry else "бессрочно"
+    
+    text = (
+        f"👤 *Твой профиль*\n\n"
+        f"💎 *Тариф:* {PLANS[plan]['name']}\n"
+        f"⏳ Действует: {expiry_text}\n\n"
+        f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
+        f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
+        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
+        f"👥 *Рефералов:* {refs}\n"
+        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
+        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+# ========== СКАЧИВАНИЕ ВИДЕО ==========
+async def download_video(url):
+    try:
+        ydl_opts = {
+            **YDL_OPTIONS,
+            'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s_%(id)s.%(ext)s'),
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            return filename if os.path.exists(filename) else None
+    except Exception as e:
+        logger.error(f"Ошибка скачивания: {e}")
+        return None
+
+async def analyze_video_url(url):
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', 'Название не найдено')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Неизвестный автор')
+            
+            minutes = duration // 60
+            seconds = duration % 60
+            
+            return f"""📹 *Информация о видео*
+
+**Название:** {title}
+**Автор:** {uploader}
+**Длительность:** {minutes}:{seconds:02d}"""
+    except:
+        return None
 
 # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1239,7 +1199,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     text = update.message.text.strip()
     
-    # Проверка бана
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
@@ -1252,25 +1211,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
-    # Проверяем, похоже ли на ссылку
     if 'http://' in text or 'https://' in text or 'www.' in text:
-        # Это ссылка - пробуем скачать
         can, left = check_download_limit(user_id)
         if not can:
             await update.message.reply_text(
-                "❌ *Лимит скачиваний исчерпан*\n\n"
-                f"Ты использовал все скачивания на сегодня.\n"
-                f"Купи подписку /plan или приведи друзей /ref для увеличения лимита!",
+                "❌ *Лимит скачиваний исчерпан*\n\nКупи подписку /plan или приведи друзей /ref",
                 parse_mode='Markdown'
             )
             return
         
-        # Сначала пробуем проанализировать
         info = await analyze_video_url(text)
         if info:
             await update.message.reply_text(info, parse_mode='Markdown')
         
-        # Скачиваем видео
         msg = await update.message.reply_text("⏳ Скачиваю видео...")
         
         try:
@@ -1292,32 +1245,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(filepath)
             await msg.delete()
             
-            _, left = check_download_limit(user_id)
-            if left < 3:
-                await update.message.reply_text(
-                    f"⚠️ У тебя осталось {left} скачиваний сегодня.\n"
-                    f"Приведи друга /ref, чтобы получить больше!"
-                )
-            
         except Exception as e:
             logger.error(f"Ошибка: {e}")
             await msg.edit_text("❌ Ошибка, попробуй другую ссылку")
     
     else:
-        # Не ссылка - отправляем как AI запрос
         can, left = check_ai_limit(user_id)
         if not can:
             await update.message.reply_text(
-                "❌ *Лимит AI-запросов исчерпан*\n\n"
-                f"Ты использовал все запросы на сегодня.\n"
-                f"Купи подписку /plan или приведи друзей /ref для увеличения лимита!",
+                "❌ *Лимит AI-запросов исчерпан*\n\nКупи подписку /plan или приведи друзей /ref",
                 parse_mode='Markdown'
             )
             return
         
         msg = await update.message.reply_text("🤔 Думаю...")
         response = await ask_ai(text, user_id)
-        await msg.edit_text(response, parse_mode='Markdown')
+        await msg.edit_text(f"🤖 *AI-ассистент:*\n\n{response}", parse_mode='Markdown')
 
 # ========== ЗАПУСК ==========
 def main():
@@ -1363,7 +1306,7 @@ def main():
     # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот с улучшенной генерацией изображений запущен")
+    logger.info("✅ Бот с AI и генерацией изображений запущен")
     app.run_polling()
 
 if __name__ == '__main__':
