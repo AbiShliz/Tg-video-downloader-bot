@@ -14,20 +14,22 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден!")
 
-# ⚠️ ВАЖНО: ВСТАВЬ СВОЙ ID СЮДА (число от @userinfobot)
-ADMIN_ID = 920343231  # 👈 ЗАМЕНИ НА СВОЙ ID!
+# ⚠️ ВАЖНО: ВСТАВЬ СВОЙ ID СЮДА
+ADMIN_ID = 123456789  # 👈 ЗАМЕНИ НА СВОЙ ID!
 
 # Настройки yt-dlp
 YDL_OPTIONS = {'format': 'best[ext=mp4]/best', 'quiet': True}
 
-# Папка для скачивания
+# Папка для скачивания (временная)
 DOWNLOAD_DIR = 'downloads'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ========== РАБОТА С БАЗОЙ ДАННЫХ ==========
+DB_PATH = '/data/users.db'  # 👈 ВАЖНО: путь к постоянному хранилищу
+
 def init_db():
     """Создание таблицы пользователей"""
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY,
@@ -39,23 +41,21 @@ def init_db():
                   downloads_count INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
+    logging.info(f"База данных инициализирована по пути {DB_PATH}")
 
 def save_user(user_id, username, first_name, last_name):
     """Сохранить или обновить пользователя"""
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Проверяем, есть ли пользователь
     c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     if c.fetchone():
-        # Обновляем существующего
         c.execute('''UPDATE users SET 
                      username = ?, first_name = ?, last_name = ?, last_active = ?
                      WHERE user_id = ?''',
                   (username, first_name, last_name, now, user_id))
     else:
-        # Добавляем нового
         c.execute('''INSERT INTO users 
                      (user_id, username, first_name, last_name, first_seen, last_active, downloads_count)
                      VALUES (?, ?, ?, ?, ?, ?, 0)''',
@@ -65,7 +65,7 @@ def save_user(user_id, username, first_name, last_name):
 
 def increment_downloads(user_id):
     """Увеличить счетчик скачиваний"""
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''UPDATE users SET downloads_count = downloads_count + 1,
                   last_active = ?
@@ -76,32 +76,36 @@ def increment_downloads(user_id):
 
 def get_stats():
     """Получить статистику для админа"""
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # Всего пользователей
     c.execute("SELECT COUNT(*) FROM users")
     total_users = c.fetchone()[0]
     
-    # Пользователей за сегодня
     today = datetime.now().strftime("%Y-%m-%d")
     c.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today}%",))
     active_today = c.fetchone()[0]
     
-    # Всего скачиваний
     c.execute("SELECT SUM(downloads_count) FROM users")
     total_downloads = c.fetchone()[0] or 0
     
     conn.close()
     return total_users, active_today, total_downloads
 
+def get_all_users():
+    """Получить всех пользователей для рассылки"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    users = c.fetchall()
+    conn.close()
+    return users
+
 # ========== АДМИН-КОМАНДЫ ==========
 async def is_admin(user_id):
-    """Проверка, является ли пользователь админом"""
     return user_id == ADMIN_ID
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /stats - только для админа"""
     user_id = update.effective_user.id
     
     if not await is_admin(user_id):
@@ -122,27 +126,19 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(stats_text, parse_mode='Markdown')
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /broadcast - рассылка всем пользователям (только админ)"""
     user_id = update.effective_user.id
     
     if not await is_admin(user_id):
         await update.message.reply_text("❌ У тебя нет прав администратора.")
         return
     
-    # Получаем текст после команды
     text = update.message.text.replace('/broadcast', '', 1).strip()
     
     if not text:
-        await update.message.reply_text("❌ Напиши текст после /broadcast\nПример: /broadcast Привет всем!")
+        await update.message.reply_text("❌ Напиши текст после /broadcast")
         return
     
-    # Получаем всех пользователей
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    users = c.fetchall()
-    conn.close()
-    
+    users = get_all_users()
     await update.message.reply_text(f"📢 Начинаю рассылку {len(users)} пользователям...")
     
     sent = 0
@@ -164,7 +160,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ОСНОВНЫЕ ФУНКЦИИ БОТА ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     user = update.effective_user
     save_user(user.id, user.username, user.first_name, user.last_name)
     
@@ -179,7 +174,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /help"""
     await update.message.reply_text(
         "📖 *Как пользоваться ботом*\n\n"
         "1. Найди ссылку на видео\n"
@@ -190,11 +184,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений"""
     user = update.effective_user
     url = update.message.text.strip()
     
-    # Сохраняем активность пользователя
     save_user(user.id, user.username, user.first_name, user.last_name)
     
     msg = await update.message.reply_text("⏳ Скачиваю...")
@@ -204,10 +196,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
         
-        # Увеличиваем счетчик скачиваний
         increment_downloads(user.id)
         
-        # Отправляем видео
         with open(filename, 'rb') as f:
             await update.message.reply_video(f)
         
@@ -218,25 +208,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ЗАПУСК БОТА ==========
 def main():
+    # Создаем папку /data если её нет (на всякий случай)
+    os.makedirs('/data', exist_ok=True)
+    
     # Инициализируем базу данных
     init_db()
-    logging.info("База данных инициализирована")
     
-    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    
-    # Админ-команды
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
-    
-    # Обработчик ссылок
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logging.info("Бот запущен и готов к работе!")
+    logging.info("🚀 Бот запущен с постоянным хранилищем /data")
     app.run_polling()
 
 if __name__ == '__main__':
