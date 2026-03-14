@@ -21,7 +21,7 @@ time.sleep(3)
 
 # Настройка логирования
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -342,16 +342,54 @@ def get_stats():
 
 # ========== УЛУЧШЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ==========
 async def generate_image(prompt, style='realistic', max_retries=2):
-    """Генерация изображения с несколькими API"""
+    """Генерация изображения с несколькими API (все работают без ключей!)"""
     try:
         style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
         logger.info(f"Генерация изображения: {style_prompt[:50]}...")
         
-        # 1. FusionBrain (российский, стабильный)
+        # 1. DeepAI (бесплатный, быстрый, без ключа)
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://api.deepai.org/api/text2img"
+                headers = {"api-key": "quickstart-QUdJIGlzIGNvbWluZy4uLi4K"}  # Публичный ключ
+                data = {"text": style_prompt}
+                
+                async with session.post(url, data=data, headers=headers, timeout=60) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        if result.get('output_url'):
+                            # Скачиваем картинку
+                            async with session.get(result['output_url']) as img_resp:
+                                if img_resp.status == 200:
+                                    image_data = await img_resp.read()
+                                    logger.info("✅ DeepAI успешно сгенерировал изображение")
+                                    return image_data
+        except Exception as e:
+            logger.warning(f"DeepAI error: {e}")
+        
+        # 2. Craiyon (бесплатный, без ключа)
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://api.craiyon.com/v3"
+                payload = {
+                    "prompt": style_prompt,
+                    "version": "35s9hf7d",
+                    "negative_prompt": ""
+                }
+                async with session.post(url, json=payload, timeout=60) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('images'):
+                            image_data = base64.b64decode(data['images'][0])
+                            logger.info("✅ Craiyon успешно сгенерировал изображение")
+                            return image_data
+        except Exception as e:
+            logger.warning(f"Craiyon error: {e}")
+        
+        # 3. FusionBrain (российский, если есть ключи)
         if FUSIONBRAIN_KEY and FUSIONBRAIN_SECRET:
             try:
                 async with aiohttp.ClientSession() as session:
-                    # Получаем pipeline ID
                     pipeline_url = "https://api-key.fusionbrain.ai/key/api/v1/pipelines"
                     headers = {
                         "X-Key": FUSIONBRAIN_KEY,
@@ -364,7 +402,6 @@ async def generate_image(prompt, style='realistic', max_retries=2):
                             if pipelines and len(pipelines) > 0:
                                 pipeline_id = pipelines[0]['id']
                                 
-                                # Генерируем изображение
                                 gen_url = f"https://api-key.fusionbrain.ai/key/api/v1/pipeline/{pipeline_id}/run"
                                 data = {
                                     "type": "GENERATE",
@@ -387,31 +424,10 @@ async def generate_image(prompt, style='realistic', max_retries=2):
             except Exception as e:
                 logger.warning(f"FusionBrain error: {e}")
         
-        # 2. DeepAI (бесплатный, быстрый)
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://api.deepai.org/api/text2img"
-                headers = {"api-key": "quickstart-QUdJIGlzIGNvbWluZy4uLi4K"}
-                data = {"text": style_prompt}
-                
-                async with session.post(url, data=data, headers=headers, timeout=60) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        if result.get('output_url'):
-                            # Скачиваем картинку
-                            async with session.get(result['output_url']) as img_resp:
-                                if img_resp.status == 200:
-                                    image_data = await img_resp.read()
-                                    logger.info("✅ DeepAI успешно сгенерировал изображение")
-                                    return image_data
-        except Exception as e:
-            logger.warning(f"DeepAI error: {e}")
-        
-        # 3. Prodia (запасной вариант)
+        # 4. Prodia (если есть ключ)
         if PRODIA_KEY:
             try:
                 async with aiohttp.ClientSession() as session:
-                    # Сначала создаем задачу
                     url = "https://api.prodia.com/v1/sd/generate"
                     params = {
                         "model": "sdv1_4.ckpt",
@@ -429,7 +445,6 @@ async def generate_image(prompt, style='realistic', max_retries=2):
                             job = await resp.json()
                             job_id = job.get('job')
                             
-                            # Ждем результат
                             for _ in range(10):
                                 await asyncio.sleep(2)
                                 status_url = f"https://api.prodia.com/v1/job/{job_id}"
@@ -441,12 +456,10 @@ async def generate_image(prompt, style='realistic', max_retries=2):
                                                 image_data = await img_resp.read()
                                                 logger.info("✅ Prodia успешно сгенерировал изображение")
                                                 return image_data
-                                        elif result.get('status') == 'failed':
-                                            break
             except Exception as e:
                 logger.warning(f"Prodia error: {e}")
         
-        # 4. Pollinations (ваш старый, как запасной)
+        # 5. Pollinations (запасной)
         try:
             encoded_prompt = urllib.parse.quote(style_prompt)
             api_url = f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
@@ -478,7 +491,7 @@ async def ask_ai(prompt, user_id):
 
     logger.info(f"AI запрос от пользователя {user_id}: {prompt[:50]}...")
 
-    # 1. OpenRouter (бесплатные модели, работают через VPN/прокси)
+    # 1. OpenRouter (бесплатные модели)
     if OPENROUTER_API_KEY:
         models_to_try = [
             'google/gemini-1.5-flash:free',
@@ -601,7 +614,7 @@ async def ask_ai(prompt, user_id):
     except Exception as e:
         logger.warning(f"MatrixHub error: {e}")
 
-    # 5. FICHI.AI (российская платформа с доступом ко всем моделям)
+    # 5. FICHI.AI (российская платформа)
     if FICHI_API_KEY:
         try:
             async with aiohttp.ClientSession() as session:
