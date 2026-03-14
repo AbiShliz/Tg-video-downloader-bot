@@ -36,13 +36,21 @@ if not BOT_TOKEN:
 # Твой Telegram ID (админ)
 ADMIN_ID = 920343231
 
+# ========== ПРОВЕРКА НАЛИЧИЯ FFMPEG ==========
+FFMPEG_AVAILABLE = False
+try:
+    subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+    FFMPEG_AVAILABLE = True
+    logger.info("✅ FFmpeg установлен")
+except:
+    logger.warning("⚠️ FFmpeg не найден! Функции конвертации будут недоступны")
+
 # ========== НАСТРОЙКИ ==========
 DOWNLOAD_DIR = 'downloads'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Путь к шрифту для мемов (скачайте Impact.ttf и положите в папку fonts)
-FONT_PATH = 'fonts/impact.ttf'
-FONT_SIZE = 40
+# Путь к шрифту для мемов
+FONT_PATH = 'impact.ttf'  # лежит в корне
 
 # Базовые опции для yt-dlp
 YDL_OPTIONS = {
@@ -51,7 +59,7 @@ YDL_OPTIONS = {
     'postprocessors': [{
         'key': 'FFmpegVideoConvertor',
         'preferedformat': 'mp4',
-    }],
+    }] if FFMPEG_AVAILABLE else [],
     'quiet': True,
     'no_warnings': True,
 }
@@ -76,14 +84,14 @@ PLANS = {
         'price': 0,
         'daily_limit': 3,
         'max_size_mb': 50,
-        'features': ['3 видео/день', 'MP4', 'до 50 МБ', 'Без мемов']
+        'features': ['3 видео/день', 'MP4', 'до 50 МБ']
     },
     'starter': {
         'name': '🔸 Стартовый',
         'price': 25,
         'daily_limit': 30,
         'max_size_mb': 500,
-        'features': ['30 видео/день', 'MP4 со звуком', 'до 500 МБ', 'Мемы', 'GIF', 'Аудио', 'Приоритет']
+        'features': ['30 видео/день', 'MP4 со звуком', 'до 500 МБ', 'Поиск музыки', 'Мемы', 'Приоритет']
     },
     'premium': {
         'name': '💎 Премиум',
@@ -317,103 +325,120 @@ async def download_video(url):
         logger.error(f"Ошибка скачивания: {e}")
         return None, f"❌ Ошибка: {str(e)[:100]}"
 
+# ========== ФУНКЦИИ ДЛЯ ПОИСКА И СКАЧИВАНИЯ МУЗЫКИ ==========
+async def search_youtube(query, max_results=5):
+    """Поиск видео на YouTube по запросу"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'force_generic_extractor': False,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            search_query = f"ytsearch{max_results}:{query}"
+            info = ydl.extract_info(search_query, download=False)
+            
+            results = []
+            if 'entries' in info:
+                for entry in info['entries']:
+                    # Пропускаем shorts
+                    if entry.get('title') and not entry.get('title', '').startswith('#shorts'):
+                        results.append({
+                            'id': entry.get('id'),
+                            'title': entry.get('title'),
+                            'duration': entry.get('duration'),
+                            'url': f"https://youtu.be/{entry.get('id')}",
+                            'channel': entry.get('channel', 'Неизвестно')
+                        })
+            return results[:max_results]
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {e}")
+        return []
+
+async def download_audio(url, user_id):
+    """Скачивание аудио с YouTube в MP3"""
+    if not FFMPEG_AVAILABLE:
+        return None, "❌ FFmpeg не установлен на сервере. Скачивание музыки временно недоступно."
+    
+    try:
+        timestamp = int(time.time())
+        output_template = os.path.join(DOWNLOAD_DIR, f'audio_{timestamp}_{user_id}.%(ext)s')
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': output_template,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            base = os.path.splitext(filename)[0]
+            mp3_file = f"{base}.mp3"
+            
+            if os.path.exists(mp3_file):
+                # Получаем информацию для тегов
+                title = info.get('title', 'Аудио')
+                uploader = info.get('uploader', 'Неизвестно')
+                return mp3_file, {'title': title, 'performer': uploader}
+            return None, "❌ Не удалось создать MP3"
+            
+    except Exception as e:
+        logger.error(f"Ошибка скачивания аудио: {e}")
+        return None, f"❌ Ошибка: {str(e)[:100]}"
+
 # ========== ФУНКЦИИ ДЛЯ СОЗДАНИЯ МЕМОВ ==========
 async def create_meme(image_path, top_text, bottom_text, output_path):
     """Создание мема с текстом сверху и снизу"""
     try:
-        # Открываем изображение
         img = Image.open(image_path)
         draw = ImageDraw.Draw(img)
         
-        # Загружаем шрифт
         try:
             font = ImageFont.truetype(FONT_PATH, int(img.height * 0.08))
         except:
-            # Если шрифт не найден, используем стандартный
             font = ImageFont.load_default()
             logger.warning("Шрифт не найден, используется стандартный")
         
-        # Цвета
-        text_color = (255, 255, 255)  # Белый
-        stroke_color = (0, 0, 0)      # Черная обводка
+        text_color = (255, 255, 255)
+        stroke_color = (0, 0, 0)
         
         def draw_text_with_outline(text, y_position):
-            # Разбиваем на строки
             wrapper = textwrap.TextWrapper(width=25)
             lines = wrapper.wrap(text)
             
             for i, line in enumerate(lines):
-                # Получаем размер текста
                 bbox = draw.textbbox((0, 0), line, font=font)
                 text_width = bbox[2] - bbox[0]
                 
-                # Центрируем
                 x = (img.width - text_width) // 2
                 y = y_position + i * int(font.size * 1.2)
                 
-                # Рисуем обводку
                 for dx, dy in [(-2,-2), (-2,2), (2,-2), (2,2)]:
                     draw.text((x+dx, y+dy), line, font=font, fill=stroke_color)
                 
-                # Рисуем основной текст
                 draw.text((x, y), line, font=font, fill=text_color)
         
-        # Рисуем верхний текст
         if top_text:
             draw_text_with_outline(top_text, int(img.height * 0.05))
         
-        # Рисуем нижний текст
         if bottom_text:
             draw_text_with_outline(bottom_text, int(img.height * 0.8))
         
-        # Сохраняем
         img.save(output_path, quality=95)
         return True
         
     except Exception as e:
         logger.error(f"Ошибка создания мема: {e}")
-        return False
-
-# ========== ФУНКЦИИ ДЛЯ КОНВЕРТАЦИИ ==========
-async def convert_to_gif(input_path, output_path, max_seconds=8):
-    """Конвертация видео в GIF"""
-    try:
-        cmd = f'ffmpeg -i {input_path} -t {max_seconds} -vf "fps=10,scale=400:-1" -y {output_path}'
-        result = subprocess.run(cmd, shell=True, capture_output=True)
-        return os.path.exists(output_path)
-    except Exception as e:
-        logger.error(f"Ошибка конвертации в GIF: {e}")
-        return False
-
-async def extract_audio(input_path, output_path):
-    """Извлечение аудио из видео (MP3)"""
-    try:
-        cmd = f'ffmpeg -i {input_path} -q:a 0 -map a -y {output_path}'
-        result = subprocess.run(cmd, shell=True, capture_output=True)
-        return os.path.exists(output_path)
-    except Exception as e:
-        logger.error(f"Ошибка извлечения аудио: {e}")
-        return False
-
-async def create_circle_video(input_path, output_path):
-    """Создание кружочка (видеосообщения)"""
-    try:
-        # Обрезаем до квадрата и делаем 240x240
-        cmd = f'ffmpeg -i {input_path} -vf "crop=min(iw,ih):min(iw,ih),scale=240:240" -t 10 -y {output_path}'
-        result = subprocess.run(cmd, shell=True, capture_output=True)
-        return os.path.exists(output_path)
-    except Exception as e:
-        logger.error(f"Ошибка создания кружочка: {e}")
-        return False
-
-async def compress_video(input_path, output_path, target_bitrate="1M"):
-    """Сжатие видео"""
-    try:
-        cmd = f'ffmpeg -i {input_path} -b:v {target_bitrate} -maxrate {target_bitrate} -bufsize 2M -y {output_path}'
-        result = subprocess.run(cmd, shell=True, capture_output=True)
-        return os.path.exists(output_path)
-    except Exception as e:
-        logger.error(f"Ошибка сжатия: {e}")
         return False
 
 # ========== КОМАНДЫ ==========
@@ -434,9 +459,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🎬 *TikTokSavebot*\n\n"
         "📥 *Скачивание видео:* просто отправь ссылку\n"
-        "🎭 *Создание мемов:* /meme текст\n"
-        "🎞️ *Конвертация:* /gif, /mp3, /circle\n"
-        "🔧 *Другие функции:* /compress\n\n"
+        "🔍 *Поиск музыки:* /search запрос\n"
+        "🎭 *Создание мемов:* /meme текст (ответом на фото)\n\n"
         "🔹 *Поддерживаемые платформы:*\n"
         "YouTube, TikTok, Instagram, VK, Pinterest, Twitter/X, Reddit, Rutube, Дзен\n\n"
         "📋 /plan — тарифы\n"
@@ -451,14 +475,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Помощь*\n\n"
         "🔹 *Скачивание видео:*\n"
         "Просто отправь ссылку на видео\n\n"
+        "🔹 *Поиск музыки:*\n"
+        "/search <название> — найти и скачать MP3\n"
+        "Пример: /search Queen Bohemian Rhapsody\n\n"
         "🔹 *Создание мемов:*\n"
         "/meme текст — ответом на картинку\n"
         "Формат: /meme Текст сверху | Текст снизу\n\n"
-        "🔹 *Конвертация:*\n"
-        "/gif — ответом на видео (до 8 сек)\n"
-        "/mp3 — извлечь аудио из видео\n"
-        "/circle — сделать кружочек\n"
-        "/compress — сжать видео\n\n"
         "🔹 *Команды:*\n"
         "/start — начало\n"
         "/plan — тарифы\n"
@@ -626,13 +648,128 @@ async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ========== КОМАНДЫ ДЛЯ МЕМОВ ==========
+# ========== НОВАЯ КОМАНДА ДЛЯ ПОИСКА МУЗЫКИ ==========
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск музыки по текстовому запросу"""
+    user_id = update.effective_user.id
+    
+    # Проверка тарифа
+    plan, _ = get_user_plan(user_id)
+    if plan == 'basic':
+        await update.message.reply_text(
+            "❌ *Функция доступна только с тарифом Стартовый и выше*\n\n"
+            "Купи подписку /plan чтобы искать и скачивать музыку",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Проверка FFmpeg
+    if not FFMPEG_AVAILABLE:
+        await update.message.reply_text(
+            "❌ *FFmpeg не установлен на сервере*\n\n"
+            "Скачивание музыки временно недоступно. Администратор уже знает о проблеме.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    query = ' '.join(context.args) if context.args else None
+    
+    if not query:
+        await update.message.reply_text(
+            "❓ Использование: /search <название песни>\n\n"
+            "Пример: /search Queen Bohemian Rhapsody"
+        )
+        return
+    
+    status_msg = await update.message.reply_text(f"🔍 Ищу: {query}...")
+    
+    # Выполняем поиск
+    results = await search_youtube(query, max_results=5)
+    
+    if not results:
+        await status_msg.edit_text("❌ Ничего не найдено. Попробуй другой запрос.")
+        return
+    
+    # Создаем клавиатуру с результатами
+    keyboard = []
+    for i, result in enumerate(results):
+        duration = result['duration']
+        if duration:
+            minutes = duration // 60
+            seconds = duration % 60
+            duration_str = f"{minutes}:{seconds:02d}"
+        else:
+            duration_str = "?"
+        
+        button_text = f"{i+1}. {result['title'][:45]} ({duration_str})"
+        keyboard.append([InlineKeyboardButton(
+            button_text, 
+            callback_data=f"music_{result['id']}"
+        )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await status_msg.edit_text(
+        f"🔍 *Результаты поиска* для: {query}\n\nВыбери трек для скачивания:",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+    
+    # Сохраняем результаты в контексте
+    context.user_data['search_results'] = results
+
+# ========== ОБРАБОТЧИК ВЫБОРА ТРЕКА ==========
+async def music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачивание выбранного трека"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Проверка тарифа
+    plan, _ = get_user_plan(user_id)
+    if plan == 'basic':
+        await query.edit_message_text(
+            "❌ *Функция доступна только с тарифом Стартовый и выше*\n\n"
+            "Купи подписку /plan чтобы искать и скачивать музыку",
+            parse_mode='Markdown'
+        )
+        return
+    
+    video_id = query.data.replace('music_', '')
+    
+    status_msg = await query.edit_message_text("🎵 Скачиваю аудио...")
+    
+    try:
+        url = f"https://youtu.be/{video_id}"
+        
+        result, info = await download_audio(url, user_id)
+        
+        if result and os.path.exists(result):
+            with open(result, 'rb') as f:
+                await context.bot.send_audio(
+                    chat_id=user_id,
+                    audio=f,
+                    title=info.get('title', 'Аудио'),
+                    performer=info.get('performer', 'Неизвестно'),
+                    caption="✅ Готово!"
+                )
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text(f"❌ {info if isinstance(info, str) else 'Не удалось скачать аудио'}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+        await status_msg.edit_text("❌ Ошибка при скачивании")
+    finally:
+        if result and os.path.exists(result):
+            os.remove(result)
+
+# ========== КОМАНДА ДЛЯ МЕМОВ ==========
 async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Создание мема: /meme Текст сверху | Текст снизу"""
     user_id = update.effective_user.id
     plan, _ = get_user_plan(user_id)
     
-    # Проверяем доступ (только для платных тарифов)
     if plan == 'basic':
         await update.message.reply_text(
             "❌ *Функция доступна только с тарифом Стартовый и выше*\n\n"
@@ -641,7 +778,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Парсим текст
     text = ' '.join(context.args) if context.args else ""
     if not text:
         await update.message.reply_text(
@@ -651,7 +787,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Разделяем верхний и нижний текст
     if '|' in text:
         top, bottom = text.split('|', 1)
         top = top.strip()
@@ -660,7 +795,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         top = text
         bottom = ""
     
-    # Проверяем, ответил ли на картинку
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
         await update.message.reply_text("❌ Ответь этой командой на картинку")
         return
@@ -668,16 +802,13 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("🎭 Создаю мем...")
     
     try:
-        # Получаем фото
         photo = update.message.reply_to_message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
-        # Скачиваем
         input_path = f"temp_input_{user_id}.jpg"
         output_path = f"meme_output_{user_id}.jpg"
         await file.download_to_drive(input_path)
         
-        # Создаем мем
         success = await create_meme(input_path, top, bottom, output_path)
         
         if success and os.path.exists(output_path):
@@ -691,7 +822,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await status_msg.edit_text("❌ Не удалось создать мем")
         
-        # Чистим
         if os.path.exists(input_path):
             os.remove(input_path)
         if os.path.exists(output_path):
@@ -700,201 +830,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка создания мема: {e}")
         await status_msg.edit_text("❌ Ошибка при создании мема")
-
-# ========== КОМАНДЫ ДЛЯ КОНВЕРТАЦИИ ==========
-async def gif_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Конвертация видео в GIF"""
-    user_id = update.effective_user.id
-    plan, _ = get_user_plan(user_id)
-    
-    if plan == 'basic':
-        await update.message.reply_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    if not update.message.reply_to_message or not update.message.reply_to_message.video:
-        await update.message.reply_text("❌ Ответь этой командой на видео")
-        return
-    
-    status_msg = await update.message.reply_text("🎞️ Конвертирую в GIF...")
-    
-    try:
-        video = update.message.reply_to_message.video
-        file = await context.bot.get_file(video.file_id)
-        
-        input_path = f"input_video_{user_id}.mp4"
-        output_path = f"output_gif_{user_id}.gif"
-        
-        await file.download_to_drive(input_path)
-        
-        success = await convert_to_gif(input_path, output_path)
-        
-        if success and os.path.exists(output_path):
-            with open(output_path, 'rb') as f:
-                await update.message.reply_animation(f)
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Не удалось конвертировать")
-        
-        # Чистим
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-            
-    except Exception as e:
-        logger.error(f"Ошибка конвертации: {e}")
-        await status_msg.edit_text("❌ Ошибка при конвертации")
-
-async def mp3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Извлечение аудио из видео"""
-    user_id = update.effective_user.id
-    plan, _ = get_user_plan(user_id)
-    
-    if plan == 'basic':
-        await update.message.reply_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    if not update.message.reply_to_message or not update.message.reply_to_message.video:
-        await update.message.reply_text("❌ Ответь этой командой на видео")
-        return
-    
-    status_msg = await update.message.reply_text("🎵 Извлекаю аудио...")
-    
-    try:
-        video = update.message.reply_to_message.video
-        file = await context.bot.get_file(video.file_id)
-        
-        input_path = f"input_video_{user_id}.mp4"
-        output_path = f"output_audio_{user_id}.mp3"
-        
-        await file.download_to_drive(input_path)
-        
-        success = await extract_audio(input_path, output_path)
-        
-        if success and os.path.exists(output_path):
-            with open(output_path, 'rb') as f:
-                await update.message.reply_audio(
-                    audio=f,
-                    title=video.file_name or "audio",
-                    performer="TikTokSavebot"
-                )
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Не удалось извлечь аудио")
-        
-        # Чистим
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-            
-    except Exception as e:
-        logger.error(f"Ошибка извлечения аудио: {e}")
-        await status_msg.edit_text("❌ Ошибка при извлечении аудио")
-
-async def circle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание кружочка (видеосообщения)"""
-    user_id = update.effective_user.id
-    plan, _ = get_user_plan(user_id)
-    
-    if plan == 'basic':
-        await update.message.reply_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    if not update.message.reply_to_message or not update.message.reply_to_message.video:
-        await update.message.reply_text("❌ Ответь этой командой на видео")
-        return
-    
-    status_msg = await update.message.reply_text("⭕ Создаю кружочек...")
-    
-    try:
-        video = update.message.reply_to_message.video
-        file = await context.bot.get_file(video.file_id)
-        
-        input_path = f"input_video_{user_id}.mp4"
-        output_path = f"output_circle_{user_id}.mp4"
-        
-        await file.download_to_drive(input_path)
-        
-        success = await create_circle_video(input_path, output_path)
-        
-        if success and os.path.exists(output_path):
-            with open(output_path, 'rb') as f:
-                await update.message.reply_video_note(
-                    video_note=f,
-                    length=240
-                )
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Не удалось создать кружочек")
-        
-        # Чистим
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-            
-    except Exception as e:
-        logger.error(f"Ошибка создания кружочка: {e}")
-        await status_msg.edit_text("❌ Ошибка при создании кружочка")
-
-async def compress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сжатие видео"""
-    user_id = update.effective_user.id
-    plan, _ = get_user_plan(user_id)
-    
-    if plan == 'basic':
-        await update.message.reply_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    if not update.message.reply_to_message or not update.message.reply_to_message.video:
-        await update.message.reply_text("❌ Ответь этой командой на видео")
-        return
-    
-    status_msg = await update.message.reply_text("🔧 Сжимаю видео...")
-    
-    try:
-        video = update.message.reply_to_message.video
-        file = await context.bot.get_file(video.file_id)
-        
-        input_path = f"input_video_{user_id}.mp4"
-        output_path = f"output_compressed_{user_id}.mp4"
-        
-        await file.download_to_drive(input_path)
-        
-        success = await compress_video(input_path, output_path)
-        
-        if success and os.path.exists(output_path):
-            with open(output_path, 'rb') as f:
-                await update.message.reply_video(
-                    video=f,
-                    caption="✅ Видео сжато"
-                )
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ Не удалось сжать видео")
-        
-        # Чистим
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-            
-    except Exception as e:
-        logger.error(f"Ошибка сжатия: {e}")
-        await status_msg.edit_text("❌ Ошибка при сжатии")
 
 # ========== ПЛАТЕЖИ ==========
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -928,7 +863,7 @@ async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-# ========== АДМИН-КОМАНДЫ ==========
+# ========== АДМИН-КОМАНДЫ (сокращенно) ==========
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1234,15 +1169,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(result)
     
     else:
-        # Если не ссылка - показываем список команд
         await update.message.reply_text(
             "📤 Отправь ссылку на видео, чтобы скачать его\n\n"
             "Доступные команды:\n"
+            "/search — поиск музыки\n"
             "/meme — создать мем из картинки\n"
-            "/gif — конвертировать видео в GIF\n"
-            "/mp3 — извлечь аудио из видео\n"
-            "/circle — сделать кружочек\n"
-            "/compress — сжать видео\n"
             "/profile — профиль\n"
             "/plan — тарифы\n"
             "/ref — рефералы"
@@ -1251,19 +1182,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ЗАПУСК ==========
 def main():
     os.makedirs('/data', exist_ok=True)
-    os.makedirs('fonts', exist_ok=True)
     init_db()
-    
-    # Проверка наличия ffmpeg
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True)
-        logger.info("✅ FFmpeg установлен")
-    except:
-        logger.error("❌ FFmpeg не найден! Видео могут быть без звука, функции конвертации не будут работать")
-    
-    # Проверка наличия шрифта
-    if not os.path.exists(FONT_PATH):
-        logger.warning(f"⚠️ Шрифт не найден по пути {FONT_PATH}. Мемы будут использовать стандартный шрифт.")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -1275,11 +1194,8 @@ def main():
     app.add_handler(CommandHandler("ref", ref_cmd))
     
     # Новые команды
+    app.add_handler(CommandHandler("search", search_command))
     app.add_handler(CommandHandler("meme", meme_command))
-    app.add_handler(CommandHandler("gif", gif_command))
-    app.add_handler(CommandHandler("mp3", mp3_command))
-    app.add_handler(CommandHandler("circle", circle_command))
-    app.add_handler(CommandHandler("compress", compress_command))
     
     # Админ-команды
     app.add_handler(CommandHandler("stats", stats_command))
@@ -1300,6 +1216,7 @@ def main():
     app.add_handler(CallbackQueryHandler(ref_cmd, pattern="^ref$"))
     app.add_handler(CallbackQueryHandler(back_profile, pattern="^back_profile$"))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
+    app.add_handler(CallbackQueryHandler(music_callback, pattern="^music_"))
     
     # Платежи
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
@@ -1308,7 +1225,7 @@ def main():
     # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот с функциями скачивания и мемов запущен")
+    logger.info("✅ Бот с функциями скачивания, поиска музыки и мемов запущен")
     app.run_polling()
 
 if __name__ == '__main__':
