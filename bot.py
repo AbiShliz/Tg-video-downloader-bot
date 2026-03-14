@@ -8,7 +8,7 @@ import csv
 import aiohttp
 import asyncio
 import urllib.parse
-import base64
+import subprocess
 from datetime import datetime, timedelta
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,57 +34,93 @@ if not BOT_TOKEN:
 # Твой Telegram ID (админ)
 ADMIN_ID = 920343231
 
-# ========== API КЛЮЧИ ==========
-DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
-
-# Логируем наличие ключей
-if DEEPSEEK_API_KEY:
-    logger.info(f"✅ DeepSeek ключ найден: {DEEPSEEK_API_KEY[:10]}...")
-else:
-    logger.error("❌ DeepSeek ключ НЕ НАЙДЕН!")
-
-# ========== НАСТРОЙКИ API ==========
-IMAGE_STYLES = {
-    'realistic': 'фотореализм, высокое качество, 4k, детализировано',
-    'artistic': 'художественный стиль, арт, креативно, абстрактно',
-    'cartoon': 'мультяшный стиль, анимация, яркие цвета, дисней',
-    'sketch': 'скетч, набросок карандашом, черно-белый, эскиз'
-}
-
 # ========== НАСТРОЙКИ СКАЧИВАНИЯ ==========
+DOWNLOAD_DIR = 'downloads'
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Базовые опции для yt-dlp
 YDL_OPTIONS = {
-    'format': 'best[ext=mp4]/best',
+    'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    'merge_output_format': 'mp4',
+    'postprocessors': [{
+        'key': 'FFmpegVideoConvertor',
+        'preferedformat': 'mp4',
+    }],
     'quiet': True,
     'no_warnings': True,
 }
-DOWNLOAD_DIR = 'downloads'
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Поддерживаемые платформы с настройками
+PLATFORMS = {
+    'youtube': {
+        'name': 'YouTube',
+        'patterns': ['youtube.com', 'youtu.be'],
+        'enabled': True
+    },
+    'tiktok': {
+        'name': 'TikTok',
+        'patterns': ['tiktok.com'],
+        'enabled': True
+    },
+    'instagram': {
+        'name': 'Instagram',
+        'patterns': ['instagram.com'],
+        'enabled': True
+    },
+    'vk': {
+        'name': 'VK',
+        'patterns': ['vk.com', 'vkontakte.ru'],
+        'enabled': True
+    },
+    'pinterest': {
+        'name': 'Pinterest',
+        'patterns': ['pinterest.com', 'pin.it'],
+        'enabled': True
+    },
+    'twitter': {
+        'name': 'Twitter/X',
+        'patterns': ['twitter.com', 'x.com'],
+        'enabled': True
+    },
+    'reddit': {
+        'name': 'Reddit',
+        'patterns': ['reddit.com'],
+        'enabled': True
+    },
+    'rutube': {
+        'name': 'Rutube',
+        'patterns': ['rutube.ru'],
+        'enabled': True
+    },
+    'dzen': {
+        'name': 'Дзен',
+        'patterns': ['dzen.ru', 'zen.yandex.ru'],
+        'enabled': True
+    }
+}
 
 # ========== ТАРИФЫ ==========
 PLANS = {
     'basic': {
         'name': '🔹 Базовый',
         'price': 0,
-        'download_limit': 3,
-        'ai_limit': 5,
-        'image_limit': 2,
-        'features': ['3 видео/день', '5 AI-запросов/день', '2 изображения/день']
+        'daily_limit': 3,
+        'max_size_mb': 50,
+        'features': ['3 видео/день', 'MP4', 'до 50 МБ']
     },
     'starter': {
         'name': '🔸 Стартовый',
         'price': 25,
-        'download_limit': 30,
-        'ai_limit': 50,
-        'image_limit': 20,
-        'features': ['30 видео/день', '50 AI-запросов/день', '20 изображений/день', 'Приоритет']
+        'daily_limit': 30,
+        'max_size_mb': 500,
+        'features': ['30 видео/день', 'MP4 со звуком', 'до 500 МБ', 'Приоритет']
     },
     'premium': {
         'name': '💎 Премиум',
         'price': 50,
-        'download_limit': 999999,
-        'ai_limit': 999999,
-        'image_limit': 999999,
-        'features': ['Безлимитные видео', 'Безлимитный AI', 'Безлимитные изображения', 'Приоритет 24/7']
+        'daily_limit': 999999,
+        'max_size_mb': 2000,
+        'features': ['Безлимитные видео', 'MP4 со звуком', 'до 2 ГБ', 'Приоритет 24/7']
     }
 }
 
@@ -92,8 +128,10 @@ PLANS = {
 DB_PATH = '/data/users.db'
 
 def init_db():
+    """Создание базы данных"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -102,25 +140,18 @@ def init_db():
         first_seen TEXT,
         last_active TEXT,
         downloads_today INTEGER DEFAULT 0,
-        ai_requests_today INTEGER DEFAULT 0,
-        image_generations_today INTEGER DEFAULT 0,
         last_download_date TEXT,
-        last_ai_date TEXT,
-        last_image_date TEXT,
         plan TEXT DEFAULT 'basic',
         plan_expiry TEXT,
         total_downloads INTEGER DEFAULT 0,
-        total_ai_requests INTEGER DEFAULT 0,
-        total_images INTEGER DEFAULT 0,
         referrer_id INTEGER DEFAULT NULL,
         referral_code TEXT UNIQUE,
         referral_count INTEGER DEFAULT 0,
         bonus_downloads INTEGER DEFAULT 0,
-        bonus_ai INTEGER DEFAULT 0,
-        bonus_images INTEGER DEFAULT 0,
         is_banned INTEGER DEFAULT 0,
         mute_until TEXT
     )''')
+    
     conn.commit()
     conn.close()
     logger.info("✅ База данных создана/проверена")
@@ -139,99 +170,62 @@ def save_user(user_id, username, first_name, last_name):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     today = datetime.now().strftime("%Y-%m-%d")
     user = get_user(user_id)
+    
     if not user:
         referral_code = f"ref{user_id}{random.randint(100, 999)}"
         c.execute('''INSERT INTO users 
             (user_id, username, first_name, last_name, first_seen, last_active, 
-             last_download_date, last_ai_date, last_image_date, referral_code)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (user_id, username, first_name, last_name, now, now, today, today, today, referral_code))
+             last_download_date, referral_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (user_id, username, first_name, last_name, now, now, today, referral_code))
     else:
         c.execute('''UPDATE users SET 
             username = ?, first_name = ?, last_name = ?, last_active = ?
             WHERE user_id = ?''',
             (username, first_name, last_name, now, user_id))
+    
     conn.commit()
     conn.close()
 
-def check_download_limit(user_id):
+def check_daily_limit(user_id):
+    """Проверка дневного лимита скачиваний"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT plan, downloads_today, bonus_downloads FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
+    
     if not result:
         return True, 3
+    
     plan, today, bonus = result
     bonus = bonus or 0
-    limit = PLANS[plan]['download_limit'] + bonus
-    return today < limit, limit - today
-
-def check_ai_limit(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT plan, ai_requests_today, bonus_ai FROM users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    if not result:
-        return True, 5
-    plan, today, bonus = result
-    bonus = bonus or 0
-    limit = PLANS[plan]['ai_limit'] + bonus
-    return today < limit, limit - today
-
-def check_image_limit(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT plan, image_generations_today, bonus_images FROM users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    if not result:
-        return True, 2
-    plan, today, bonus = result
-    bonus = bonus or 0
-    limit = PLANS[plan]['image_limit'] + bonus
+    limit = PLANS[plan]['daily_limit'] + bonus
+    today = today or 0
+    
     return today < limit, limit - today
 
 def increment_downloads(user_id):
+    """Увеличить счетчик скачиваний"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Если сегодня новый день, сбрасываем счетчик
+    c.execute("SELECT last_download_date FROM users WHERE user_id = ?", (user_id,))
+    last_date = c.fetchone()
+    
+    if last_date and last_date[0] != today:
+        c.execute("UPDATE users SET downloads_today = 0 WHERE user_id = ?", (user_id,))
+    
     c.execute('''UPDATE users SET 
         downloads_today = downloads_today + 1,
         total_downloads = total_downloads + 1,
         last_active = ?,
         last_download_date = ?
         WHERE user_id = ?''', (now, today, user_id))
-    conn.commit()
-    conn.close()
-
-def increment_ai_request(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('''UPDATE users SET 
-        ai_requests_today = ai_requests_today + 1,
-        total_ai_requests = total_ai_requests + 1,
-        last_active = ?,
-        last_ai_date = ?
-        WHERE user_id = ?''', (now, today, user_id))
-    conn.commit()
-    conn.close()
-
-def increment_image_generation(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('''UPDATE users SET 
-        image_generations_today = image_generations_today + 1,
-        total_images = total_images + 1,
-        last_active = ?,
-        last_image_date = ?
-        WHERE user_id = ?''', (now, today, user_id))
+    
     conn.commit()
     conn.close()
 
@@ -252,262 +246,171 @@ def update_user_plan(user_id, plan):
     conn.close()
 
 def process_referral(new_user_id, ref_code):
+    """Обработка реферального перехода"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute("SELECT user_id FROM users WHERE referral_code = ?", (ref_code,))
     referrer = c.fetchone()
+    
     if referrer and referrer[0] != new_user_id:
         referrer_id = referrer[0]
         c.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, new_user_id))
         c.execute('''UPDATE users SET 
             referral_count = referral_count + 1,
-            bonus_downloads = bonus_downloads + 3,
-            bonus_ai = bonus_ai + 2,
-            bonus_images = bonus_images + 1
+            bonus_downloads = bonus_downloads + 3
             WHERE user_id = ?''', (referrer_id,))
         conn.commit()
         conn.close()
         return referrer_id
+    
     conn.close()
     return None
 
 def get_referral_info(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT referral_code, referral_count, bonus_downloads, bonus_ai, bonus_images FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT referral_code, referral_count, bonus_downloads FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
-    return result or (None, 0, 0, 0, 0)
+    return result or (None, 0, 0)
 
 def get_stats():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
+    
     today = datetime.now().strftime("%Y-%m-%d")
     c.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today}%",))
     active = c.fetchone()[0]
+    
     c.execute("SELECT SUM(total_downloads) FROM users")
     downloads = c.fetchone()[0] or 0
-    c.execute("SELECT SUM(total_ai_requests) FROM users")
-    ai_requests = c.fetchone()[0] or 0
-    c.execute("SELECT SUM(total_images) FROM users")
-    images = c.fetchone()[0] or 0
+    
     c.execute("SELECT plan, COUNT(*) FROM users GROUP BY plan")
     plans_stats = c.fetchall()
+    
     conn.close()
-    return total, active, downloads, ai_requests, images, plans_stats
+    return total, active, downloads, plans_stats
 
-# ========== ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНОК ==========
-async def generate_image(prompt, style='realistic'):
-    """Генерация изображения через Pollinations"""
+# ========== ФУНКЦИИ ДЛЯ ОПРЕДЕЛЕНИЯ ПЛАТФОРМЫ ==========
+def detect_platform(url):
+    """Определяет, с какой платформы ссылка"""
+    url_lower = url.lower()
+    
+    for platform_id, platform in PLATFORMS.items():
+        if not platform['enabled']:
+            continue
+        for pattern in platform['patterns']:
+            if pattern in url_lower:
+                return platform_id, platform['name']
+    
+    return None, "Неизвестная платформа"
+
+# ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
+def get_ydl_opts_for_platform(platform):
+    """Возвращает опции для конкретной платформы"""
+    base_opts = YDL_OPTIONS.copy()
+    
+    # Специфические настройки для разных платформ
+    if platform == 'vk':
+        base_opts['extractor_args'] = {'vk': {'prefer_mp4': True}}
+    elif platform == 'twitter':
+        base_opts['format'] = 'best[ext=mp4]/best'
+    elif platform == 'reddit':
+        base_opts['format'] = 'best[ext=mp4]/best'
+    
+    return base_opts
+
+async def download_video(url):
+    """Универсальная функция скачивания видео"""
     try:
-        style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
-        logger.info(f"🎨 Генерирую: {style_prompt[:50]}...")
+        platform_id, platform_name = detect_platform(url)
         
-        encoded_prompt = urllib.parse.quote(style_prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        if not platform_id:
+            return None, "❌ Платформа не поддерживается"
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=60) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
-                    if len(image_data) > 1000:
-                        logger.info(f"✅ Pollinations успешно")
-                        return image_data
-                    else:
-                        logger.warning("Слишком маленький ответ")
-                        return None
-                else:
-                    logger.error(f"Pollinations ошибка {resp.status}")
-                    return None
+        logger.info(f"📥 Скачиваю с {platform_name}: {url[:50]}...")
+        
+        # Уникальное имя файла
+        timestamp = int(time.time())
+        random_id = random.randint(1000, 9999)
+        output_template = os.path.join(DOWNLOAD_DIR, f'video_{timestamp}_{random_id}.%(ext)s')
+        
+        # Получаем опции для платформы
+        ydl_opts = get_ydl_opts_for_platform(platform_id)
+        ydl_opts['outtmpl'] = output_template
+        
+        # Скачиваем
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            # Проверяем, создался ли mp4 после конвертации
+            base = os.path.splitext(filename)[0]
+            mp4_file = f"{base}.mp4"
+            
+            if os.path.exists(mp4_file):
+                final_file = mp4_file
+            elif os.path.exists(filename):
+                final_file = filename
+            else:
+                return None, "❌ Не удалось найти скачанный файл"
+            
+            # Получаем информацию о видео
+            title = info.get('title', 'Без названия')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Неизвестно')
+            
+            return final_file, {
+                'title': title,
+                'duration': duration,
+                'uploader': uploader,
+                'platform': platform_name
+            }
+            
     except Exception as e:
-        logger.error(f"Ошибка генерации: {e}")
+        logger.error(f"Ошибка скачивания: {e}")
+        return None, f"❌ Ошибка: {str(e)[:100]}"
+
+def get_video_info(url):
+    """Получить информацию о видео без скачивания"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            title = info.get('title', 'Название не найдено')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Неизвестный автор')
+            
+            minutes = duration // 60
+            seconds = duration % 60
+            
+            return {
+                'title': title,
+                'duration': f"{minutes}:{seconds:02d}",
+                'uploader': uploader
+            }
+    except:
         return None
 
-# ========== ФУНКЦИЯ AI-АССИСТЕНТА (ТОЛЬКО DEEPSEEK) ==========
-async def ask_ai(prompt, user_id):
-    """Запрос к DeepSeek API"""
-    can, left = check_ai_limit(user_id)
-    if not can:
-        return "❌ Ты исчерпал лимит AI-запросов на сегодня."
-    
-    if not DEEPSEEK_API_KEY:
-        logger.error("❌ Ключ DeepSeek не найден")
-        return "❌ Ошибка: ключ DeepSeek не найден. Добавь его в переменные окружения."
-    
-    logger.info(f"🤖 Отправляю запрос в DeepSeek: {prompt[:50]}...")
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = "https://api.deepseek.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 800
-            }
-            
-            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if 'choices' in data and len(data['choices']) > 0:
-                        result = data['choices'][0]['message']['content']
-                        increment_ai_request(user_id)
-                        logger.info("✅ DeepSeek успешно ответил")
-                        return result
-                    else:
-                        return "❌ Ошибка формата ответа от DeepSeek"
-                elif resp.status == 401:
-                    return "❌ Ошибка 401: Неверный ключ DeepSeek"
-                elif resp.status == 402:
-                    return "❌ Ошибка 402: Недостаточно средств на балансе DeepSeek"
-                elif resp.status == 429:
-                    return "❌ Слишком много запросов к DeepSeek. Попробуй позже."
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"DeepSeek ошибка {resp.status}: {error_text}")
-                    return f"❌ Ошибка DeepSeek: {resp.status}"
-                    
-    except asyncio.TimeoutError:
-        logger.error("Таймаут DeepSeek")
-        return "❌ Таймаут при обращении к DeepSeek"
-    except Exception as e:
-        logger.error(f"DeepSeek ошибка: {e}")
-        return f"❌ Ошибка соединения: {str(e)[:100]}"
-
-# ========== КОМАНДА ДЛЯ ПРОВЕРКИ КЛЮЧА ==========
-async def check_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка наличия ключа DeepSeek"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    if DEEPSEEK_API_KEY:
-        await update.message.reply_text(
-            f"✅ DeepSeek ключ найден!\n"
-            f"Начинается с: {DEEPSEEK_API_KEY[:10]}...\n"
-            f"Длина: {len(DEEPSEEK_API_KEY)} символов"
-        )
-    else:
-        await update.message.reply_text(
-            "❌ DeepSeek ключ НЕ НАЙДЕН!\n"
-            "Проверь переменные окружения в Averma"
-        )
-
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
-async def generate_image_with_style_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню выбора стиля"""
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        prompt = context.user_data.get('pending_prompt', '')
-        msg = query.message
-    else:
-        prompt = ' '.join(context.args) if context.args else None
-        msg = update.message
-    
-    if not prompt:
-        await msg.reply_text(
-            "❓ Использование: /draw <описание>\n\nПримеры:\n/draw кот в космосе\n/draw футуристический город",
-            parse_mode='Markdown'
-        )
-        return
-    
-    context.user_data['pending_prompt'] = prompt
-    keyboard = [
-        [InlineKeyboardButton("📸 Фотореализм", callback_data="style_realistic")],
-        [InlineKeyboardButton("🎨 Арт", callback_data="style_artistic")],
-        [InlineKeyboardButton("🧸 Мультяшный", callback_data="style_cartoon")],
-        [InlineKeyboardButton("✏️ Скетч", callback_data="style_sketch")],
-        [InlineKeyboardButton("🎭 Без стиля", callback_data="style_none")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await msg.reply_text(
-        f"🎨 *Выбери стиль для:*\n\n«{prompt}»",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
-
-async def generate_image_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора стиля"""
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    user_id = user.id
-    prompt = context.user_data.get('pending_prompt', '')
-    
-    if not prompt:
-        await query.edit_message_text("❌ Ошибка: промпт не найден. Попробуй /draw заново.")
-        return
-    
-    style = query.data.replace('style_', '')
-    can, left = check_image_limit(user_id)
-    if not can:
-        await query.edit_message_text(
-            "❌ *Лимит исчерпан*\n\nКупи подписку /plan или приведи друзей /ref для увеличения лимита!",
-            parse_mode='Markdown'
-        )
-        return
-    
-    status_msg = await query.edit_message_text(
-        f"🎨 *Генерирую...*\n\n«{prompt}»\n⏳ Это займет несколько секунд",
-        parse_mode='Markdown'
-    )
-    
-    image_data = await generate_image(prompt, style if style != 'none' else 'realistic')
-    
-    if not image_data:
-        await status_msg.edit_text(
-            "⚠️ *Не удалось сгенерировать*\n\nСервис временно перегружен. Попробуй позже.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        await context.bot.send_photo(
-            chat_id=user_id,
-            photo=BytesIO(image_data),
-            caption=f"🖼️ *Готово!*\n\n«{prompt}»",
-            parse_mode='Markdown'
-        )
-        increment_image_generation(user_id)
-        await status_msg.delete()
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
-        await status_msg.edit_text("❌ Ошибка при отправке.")
-
-async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для AI"""
-    user = update.effective_user
-    user_id = user.id
-    save_user(user_id, user.username, user.first_name, user.last_name)
-    
-    query = ' '.join(context.args) if context.args else None
-    if not query:
-        await update.message.reply_text(
-            "❓ Напиши вопрос после /ask\n\nПример: /ask как придумать идею для видео?",
-            parse_mode='Markdown'
-        )
-        return
-    
-    status_msg = await update.message.reply_text("🤔 Думаю...")
-    response = await ask_ai(query, user_id)
-    await status_msg.edit_text(f"🤖 *AI-ассистент:*\n\n{response}", parse_mode='Markdown')
-
+# ========== КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Стартовая команда"""
     user = update.effective_user
     args = context.args
+    
     save_user(user.id, user.username, user.first_name, user.last_name)
     
+    # Обработка реферальной ссылки
     if args and args[0].startswith('ref_'):
         ref_code = args[0].replace('ref_', '')
         referrer = process_referral(user.id, ref_code)
@@ -519,36 +422,50 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         "🎬 *TikTokSavebot*\n\n"
-        "📥 *Скачивание видео:* просто отправь ссылку\n"
-        "🎨 *Генерация картинок:* /draw описание\n"
-        "🤖 *AI-ассистент:* /ask вопрос или просто текст\n"
+        "📥 *Скачивание видео:* просто отправь ссылку\n\n"
+        "🔹 *Поддерживаемые платформы:*\n"
+        "• YouTube\n"
+        "• TikTok\n"
+        "• Instagram\n"
+        "• VK\n"
+        "• Pinterest\n"
+        "• Twitter/X\n"
+        "• Reddit\n"
+        "• Rutube\n"
+        "• Дзен\n\n"
         "📋 /plan — тарифы\n"
-        "/profile — профиль\n"
-        "/ref — рефералы\n"
-        "/help — помощь"
+        "👤 /profile — профиль\n"
+        "👥 /ref — рефералы\n"
+        "❓ /help — помощь"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Помощь"""
-    user_id = update.effective_user.id
     text = (
         "📖 *Помощь*\n\n"
-        "🔹 *Основные команды:*\n"
+        "🔹 *Как пользоваться:*\n"
+        "1. Найди видео на поддерживаемой платформе\n"
+        "2. Скопируй ссылку\n"
+        "3. Отправь её боту\n"
+        "4. Получи видео в формате MP4\n\n"
+        "🔹 *Команды:*\n"
         "/start — начало\n"
-        "/help — эта справка\n"
-        "/profile — твой профиль\n"
         "/plan — тарифы\n"
-        "/ref — рефералы\n\n"
-        "🔹 *Генерация картинок:*\n"
-        "/draw кот в космосе — создать картинку\n\n"
-        "🔹 *AI-ассистент:*\n"
-        "/ask вопрос — задай вопрос\n"
-        "Или просто отправь текст\n\n"
-        "🔹 *Скачивание видео:*\n"
-        "Отправь ссылку на видео из TikTok, Instagram, YouTube"
+        "/profile — профиль\n"
+        "/ref — рефералы\n"
+        "/help — помощь\n\n"
+        "🔹 *Лимиты:*\n"
+        "• Бесплатно: 3 видео/день\n"
+        "• Стартовый: 30 видео/день\n"
+        "• Премиум: безлимитно\n\n"
+        "🔹 *Размер файла:*\n"
+        "• До 50 МБ — бесплатно\n"
+        "• До 500 МБ — Стартовый\n"
+        "• До 2 ГБ — Премиум"
     )
     
+    user_id = update.effective_user.id
     if user_id == ADMIN_ID:
         text += "\n\n🔹 *Админ-команды:*\n"
         text += "/stats — статистика\n"
@@ -561,155 +478,509 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "/backup — бэкап\n"
         text += "/export — экспорт CSV\n"
         text += "/ping — проверка\n"
-        text += "/restart — перезапуск\n"
-        text += "/checkkey — проверить ключ"
+        text += "/restart — перезапуск"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
-# ========== АДМИН-КОМАНДЫ (сокращенно) ==========
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    total, active, downloads, ai_requests, images, plans_stats = get_stats()
-    text = f"📊 Статистика\nВсего: {total}\nАктивных: {active}\nСкачиваний: {downloads}\nAI: {ai_requests}\nКартинок: {images}"
-    await update.message.reply_text(text)
-
-async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда whois")
-
-async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда ban")
-
-async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда unban")
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда broadcast")
-
-async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда setplan")
-
-async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда addbonus")
-
-async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда resetlimit")
-
-async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда backup")
-
-async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("Команда export")
-
-async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    start = time.time()
-    msg = await update.message.reply_text("🏓 Pong...")
-    end = time.time()
-    await msg.edit_text(f"🏓 Pong! {round((end-start)*1000)}ms")
-
-async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("🔄 Перезапуск...")
-    os._exit(0)
-
-# ========== ПРОФИЛЬ И ТАРИФЫ (упрощенно) ==========
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Профиль пользователя"""
     user = update.effective_user
     user_id = user.id
+    
     save_user(user_id, user.username, user.first_name, user.last_name)
+    
     plan, expiry = get_user_plan(user_id)
-    await update.message.reply_text(f"👤 Профиль\nТариф: {PLANS[plan]['name']}")
+    plan_name = PLANS[plan]['name']
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT downloads_today, total_downloads, bonus_downloads, referral_count
+                 FROM users WHERE user_id = ?''', (user_id,))
+    data = c.fetchone()
+    conn.close()
+    
+    today = data[0] if data else 0
+    total = data[1] if data else 0
+    bonus = data[2] if data else 0
+    refs = data[3] if data else 0
+    
+    limit = PLANS[plan]['daily_limit'] + bonus
+    expiry_text = f"до {expiry}" if expiry else "бессрочно"
+    
+    text = (
+        f"👤 *Твой профиль*\n\n"
+        f"💎 *Тариф:* {plan_name}\n"
+        f"⏳ Действует: {expiry_text}\n\n"
+        f"📥 *Сегодня:* {today}/{limit} скачиваний\n"
+        f"📊 *Всего:* {total} скачиваний\n"
+        f"👥 *Рефералов:* {refs}\n"
+        f"🎁 *Бонус:* +{bonus} скачиваний/день"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
+        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать тарифы"""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("💎 Тарифы\n\nБазовый - 0★\nСтартовый - 25★\nПремиум - 50★")
+        msg = query.message
+        edit = True
     else:
-        await update.message.reply_text("💎 Тарифы\n\nБазовый - 0★\nСтартовый - 25★\nПремиум - 50★")
+        msg = update.message
+        edit = False
+    
+    text = "💎 *Тарифы*\n\n"
+    
+    for pid, plan in PLANS.items():
+        text += f"{plan['name']}\n"
+        text += f"💰 {plan['price']} ★ / месяц\n"
+        text += "▸ " + "\n▸ ".join(plan['features']) + "\n\n"
+    
+    keyboard = []
+    if edit:
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_profile")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await msg.reply_text(text, parse_mode='Markdown')
 
 async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Реферальная программа"""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-    user_id = update.effective_user.id
-    code, count, bonus_d, bonus_ai, bonus_img = get_referral_info(user_id)
-    await update.message.reply_text(f"👥 Рефералы\nПриглашено: {count}\nБонусы: +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок")
+        user_id = query.from_user.id
+        msg = query.message
+        edit = True
+    else:
+        user_id = update.effective_user.id
+        msg = update.message
+        edit = False
+    
+    code, count, bonus = get_referral_info(user_id)
+    bot_username = (await context.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start=ref_{code}"
+    
+    text = (
+        f"👥 *Реферальная программа*\n\n"
+        f"🔗 *Твоя ссылка:*\n`{link}`\n\n"
+        f"📊 *Статистика:*\n"
+        f"• Приглашено друзей: {count}\n"
+        f"• Бонус: +{bonus} скачиваний/день\n\n"
+        f"🎁 *Как это работает:*\n"
+        f"За каждого друга ты получаешь:\n"
+        f"• +3 скачивания в день навсегда"
+    )
+    
+    keyboard = []
+    if edit:
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_profile")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await msg.reply_text(text, parse_mode='Markdown')
 
+async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возврат в профиль"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    plan, expiry = get_user_plan(user_id)
+    plan_name = PLANS[plan]['name']
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT downloads_today, total_downloads, bonus_downloads, referral_count
+                 FROM users WHERE user_id = ?''', (user_id,))
+    data = c.fetchone()
+    conn.close()
+    
+    today = data[0] if data else 0
+    total = data[1] if data else 0
+    bonus = data[2] if data else 0
+    refs = data[3] if data else 0
+    
+    limit = PLANS[plan]['daily_limit'] + bonus
+    expiry_text = f"до {expiry}" if expiry else "бессрочно"
+    
+    text = (
+        f"👤 *Твой профиль*\n\n"
+        f"💎 *Тариф:* {plan_name}\n"
+        f"⏳ Действует: {expiry_text}\n\n"
+        f"📥 *Сегодня:* {today}/{limit} скачиваний\n"
+        f"📊 *Всего:* {total} скачиваний\n"
+        f"👥 *Рефералов:* {refs}\n"
+        f"🎁 *Бонус:* +{bonus} скачиваний/день"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
+        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+# ========== ПЛАТЕЖИ (Stars) ==========
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer("Покупка временно недоступна")
+    """Обработка покупки тарифа"""
+    query = update.callback_query
+    await query.answer()
+    
+    plan_id = query.data.replace('buy_', '')
+    plan = PLANS[plan_id]
+    
+    await context.bot.send_invoice(
+        chat_id=query.from_user.id,
+        title=plan['name'],
+        description=", ".join(plan['features']),
+        payload=f"sub_{plan_id}",
+        provider_token="",
+        currency="XTR",
+        prices=[{"label": plan['name'], "amount": plan['price']}]
+    )
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Предпроверка платежа"""
     await update.pre_checkout_query.answer(ok=True)
 
 async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Спасибо за покупку!")
+    """Успешная оплата"""
+    user_id = update.effective_user.id
+    payload = update.message.successful_payment.invoice_payload
+    
+    if payload.startswith('sub_'):
+        plan_id = payload.replace('sub_', '')
+        update_user_plan(user_id, plan_id)
+        await update.message.reply_text(
+            f"✅ *Тариф активирован!*\n\nТариф {PLANS[plan_id]['name']} активирован на 30 дней.",
+            parse_mode='Markdown'
+        )
 
-async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await profile_cmd(update, context)
+# ========== АДМИН-КОМАНДЫ ==========
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    total, active, downloads, plans_stats = get_stats()
+    
+    text = f"📊 *Статистика*\n\n"
+    text += f"👥 Всего пользователей: {total}\n"
+    text += f"📱 Активных сегодня: {active}\n"
+    text += f"📥 Всего скачиваний: {downloads}\n\n"
+    text += f"💎 *Тарифы:*\n"
+    
+    for plan, count in plans_stats:
+        text += f"{PLANS[plan]['name']}: {count}\n"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
-# ========== СКАЧИВАНИЕ ВИДЕО ==========
-async def download_video(url):
+async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о пользователе"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /whois <user_id или @username>")
+        return
+    
+    target = args[0]
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    if target.startswith('@'):
+        username = target[1:]
+        c.execute("SELECT * FROM users WHERE username = ?", (username,))
+    else:
+        try:
+            user_id = int(target)
+            c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        except:
+            await update.message.reply_text("❌ Неверный формат ID")
+            conn.close()
+            return
+    
+    user = c.fetchone()
+    if not user:
+        await update.message.reply_text("❌ Пользователь не найден")
+        conn.close()
+        return
+    
+    text = f"""👤 *Информация о пользователе*
+
+ID: `{user[0]}`
+Username: @{user[1] or 'нет'}
+Имя: {user[2]} {user[3] or ''}
+Первый вход: {user[4]}
+Последний вход: {user[5]}
+
+📊 *Статистика:*
+Тариф: {PLANS[user[8]]['name']}
+Скачиваний сегодня: {user[6]}
+Всего скачиваний: {user[10]}
+Рефералов: {user[12]}
+Бонус: +{user[13]} скачиваний/день
+
+{'🔴 ЗАБЛОКИРОВАН' if user[14] == 1 else '🟢 Активен'}"""
+    
+    conn.close()
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Заблокировать пользователя"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /ban <user_id>")
+        return
+    
     try:
-        ydl_opts = {
-            **YDL_OPTIONS,
-            'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s_%(id)s.%(ext)s'),
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            return filename if os.path.exists(filename) else None
+        user_id = int(args[0])
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"✅ Пользователь {user_id} заблокирован")
     except Exception as e:
-        logger.error(f"Ошибка скачивания: {e}")
-        return None
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
-async def analyze_video_url(url):
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Разблокировать пользователя"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /unban <user_id>")
+        return
+    
     try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Название не найдено')
-            duration = info.get('duration', 0)
-            uploader = info.get('uploader', 'Неизвестный автор')
-            minutes = duration // 60
-            seconds = duration % 60
-            return f"""📹 Информация о видео\n\nНазвание: {title}\nАвтор: {uploader}\nДлительность: {minutes}:{seconds:02d}"""
-    except:
-        return None
+        user_id = int(args[0])
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"✅ Пользователь {user_id} разблокирован")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка сообщения"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    text = ' '.join(context.args)
+    if not text:
+        await update.message.reply_text("Использование: /broadcast <текст>")
+        return
+    
+    await update.message.reply_text("📢 Начинаю рассылку...")
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE is_banned = 0")
+    users = c.fetchall()
+    conn.close()
+    
+    sent = 0
+    failed = 0
+    
+    for (user_id,) in users:
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"📢 *Сообщение от администратора:*\n\n{text}",
+                parse_mode='Markdown'
+            )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except:
+            failed += 1
+    
+    await update.message.reply_text(f"✅ Рассылка завершена\nОтправлено: {sent}\nОшибок: {failed}")
+
+async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выдать тариф"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /setplan <user_id> <plan>")
+        return
+    
+    try:
+        user_id = int(args[0])
+        plan = args[1].lower()
+        
+        if plan not in PLANS:
+            await update.message.reply_text(f"❌ Тариф должен быть: {', '.join(PLANS.keys())}")
+            return
+        
+        update_user_plan(user_id, plan)
+        await update.message.reply_text(f"✅ Пользователю {user_id} выдан тариф {PLANS[plan]['name']}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавить бонусы"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /addbonus <user_id> <bonus>")
+        return
+    
+    try:
+        user_id = int(args[0])
+        bonus = int(args[1])
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE users SET bonus_downloads = bonus_downloads + ? WHERE user_id = ?", (bonus, user_id))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Пользователю {user_id} добавлено +{bonus} скачиваний/день")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбросить лимиты"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /resetlimit <user_id>")
+        return
+    
+    try:
+        user_id = int(args[0])
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE users SET downloads_today = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Лимиты пользователя {user_id} сброшены")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Бэкап базы данных"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    try:
+        backup_path = f'/data/backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+        
+        conn = sqlite3.connect(DB_PATH)
+        backup_conn = sqlite3.connect(backup_path)
+        conn.backup(backup_conn)
+        backup_conn.close()
+        conn.close()
+        
+        with open(backup_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                caption="✅ Бэкап базы данных"
+            )
+        
+        os.remove(backup_path)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Экспорт пользователей в CSV"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    try:
+        csv_path = f'/data/users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''SELECT user_id, username, first_name, last_name, first_seen, 
+                    last_active, total_downloads, plan, bonus_downloads, referral_count
+                    FROM users''')
+        users = c.fetchall()
+        conn.close()
+        
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['ID', 'Username', 'Имя', 'Фамилия', 'Первый вход', 
+                            'Последний вход', 'Всего скачиваний', 'Тариф', 'Бонус', 'Рефералов'])
+            writer.writerows(users)
+        
+        with open(csv_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                caption="✅ Экспорт пользователей"
+            )
+        
+        os.remove(csv_path)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка соединения"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    start = time.time()
+    msg = await update.message.reply_text("🏓 Pong...")
+    end = time.time()
+    
+    await msg.edit_text(f"🏓 Pong!\nЗадержка: {round((end - start) * 1000)}ms")
+
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Перезапуск бота"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет прав")
+        return
+    
+    await update.message.reply_text("🔄 Перезапускаюсь...")
+    logger.info("Перезапуск по команде админа")
+    os._exit(0)
 
 # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ссылок"""
     user = update.effective_user
     user_id = user.id
     text = update.message.text.strip()
     
+    # Проверка на бан
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
@@ -722,61 +993,96 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
+    # Проверяем, является ли сообщение ссылкой
     if 'http://' in text or 'https://' in text or 'www.' in text:
-        can, left = check_download_limit(user_id)
+        
+        # Проверка лимита
+        can, left = check_daily_limit(user_id)
         if not can:
-            await update.message.reply_text("❌ Лимит скачиваний исчерпан")
+            await update.message.reply_text(
+                "❌ *Лимит скачиваний исчерпан*\n\nКупи подписку /plan или приведи друзей /ref",
+                parse_mode='Markdown'
+            )
             return
         
-        info = await analyze_video_url(text)
-        if info:
-            await update.message.reply_text(info)
+        # Определяем платформу
+        platform_id, platform_name = detect_platform(text)
+        if not platform_id:
+            await update.message.reply_text(
+                f"❌ Платформа не поддерживается\n\nПоддерживаемые платформы: YouTube, TikTok, Instagram, VK, Pinterest, Twitter/X, Reddit, Rutube, Дзен"
+            )
+            return
         
-        msg = await update.message.reply_text("⏳ Скачиваю видео...")
+        # Информируем о начале
+        msg = await update.message.reply_text(f"📥 Скачиваю с {platform_name}...")
         
+        # Скачиваем
+        result, info = await download_video(text)
+        
+        if not result:
+            await msg.edit_text(f"❌ {info}")
+            return
+        
+        # Проверяем размер
+        file_size = os.path.getsize(result) / (1024 * 1024)  # в МБ
+        max_size = PLANS[get_user_plan(user_id)[0]]['max_size_mb']
+        
+        if file_size > max_size:
+            await msg.edit_text(
+                f"❌ Видео слишком большое ({file_size:.1f} МБ)\n"
+                f"Твой тариф позволяет до {max_size} МБ"
+            )
+            os.remove(result)
+            return
+        
+        # Отправляем видео
         try:
-            filepath = await download_video(text)
-            if not filepath:
-                await msg.edit_text("❌ Не могу скачать")
-                return
-            
-            if os.path.getsize(filepath) > 50 * 1024 * 1024:
-                await msg.edit_text("❌ Видео больше 50MB")
-                os.remove(filepath)
-                return
-            
-            with open(filepath, 'rb') as f:
-                await update.message.reply_video(f)
+            with open(result, 'rb') as f:
+                caption = f"📹 *{info['title'][:50]}*" if info['title'] else None
+                await update.message.reply_video(
+                    video=f,
+                    caption=caption,
+                    parse_mode='Markdown' if caption else None,
+                    supports_streaming=True
+                )
             
             increment_downloads(user_id)
-            os.remove(filepath)
             await msg.delete()
             
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await msg.edit_text("❌ Ошибка")
+            logger.error(f"Ошибка отправки: {e}")
+            await msg.edit_text("❌ Ошибка при отправке видео")
+        
+        finally:
+            # Удаляем файл
+            if os.path.exists(result):
+                os.remove(result)
     
     else:
-        can, left = check_ai_limit(user_id)
-        if not can:
-            await update.message.reply_text("❌ Лимит AI исчерпан")
-            return
-        
-        msg = await update.message.reply_text("🤔 Думаю...")
-        response = await ask_ai(text, user_id)
-        await msg.edit_text(f"🤖 {response}")
+        # Если не ссылка - просто игнорируем или даем подсказку
+        await update.message.reply_text(
+            "📤 Отправь ссылку на видео, чтобы скачать его\n\n"
+            "Поддерживаемые платформы:\n"
+            "YouTube, TikTok, Instagram, VK, Pinterest, Twitter/X, Reddit, Rutube, Дзен"
+        )
 
 # ========== ЗАПУСК ==========
 def main():
     os.makedirs('/data', exist_ok=True)
     init_db()
+    
+    # Проверка наличия ffmpeg
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True)
+        logger.info("✅ FFmpeg установлен")
+    except:
+        logger.error("❌ FFmpeg не найден! Видео могут быть без звука.")
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("draw", generate_image_with_style_selection))
-    app.add_handler(CommandHandler("ask", ask_command))
     app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CommandHandler("plan", plans_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
@@ -794,23 +1100,21 @@ def main():
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CommandHandler("restart", restart_command))
-    app.add_handler(CommandHandler("checkkey", check_key_command))
     
     # Callback-обработчики
     app.add_handler(CallbackQueryHandler(plans_cmd, pattern="^plans$"))
     app.add_handler(CallbackQueryHandler(ref_cmd, pattern="^ref$"))
     app.add_handler(CallbackQueryHandler(back_profile, pattern="^back_profile$"))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
-    app.add_handler(CallbackQueryHandler(generate_image_callback, pattern="^style_"))
     
     # Платежи
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_success))
     
-    # Сообщения
+    # Сообщения (ссылки и текст)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот запущен")
+    logger.info("✅ Бот для скачивания видео запущен")
     app.run_polling()
 
 if __name__ == '__main__':
