@@ -41,13 +41,16 @@ DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 FUSIONBRAIN_KEY = os.environ.get('FUSIONBRAIN_KEY')
 FUSIONBRAIN_SECRET = os.environ.get('FUSIONBRAIN_SECRET')
 PRODIA_KEY = os.environ.get('PRODIA_KEY')
-FICHI_API_KEY = os.environ.get('FICHI_API_KEY')
 
 # Логируем наличие ключей
 if OPENROUTER_API_KEY:
     logger.info("✅ OpenRouter ключ найден")
+else:
+    logger.warning("❌ OpenRouter ключ НЕ найден")
+
 if DEEPSEEK_API_KEY:
     logger.info("✅ DeepSeek ключ найден")
+
 if PROXYAPI_KEY:
     logger.info("✅ ProxyAPI ключ найден")
 
@@ -311,20 +314,21 @@ def get_stats():
     conn.close()
     return total, active, downloads, ai_requests, images, plans_stats
 
-# ========== ФУНКЦИЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ==========
+# ========== УПРОЩЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ==========
 async def generate_image(prompt, style='realistic'):
-    """Генерация изображения через несколько API"""
+    """Максимально простая версия генерации картинок"""
     try:
         style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
-        logger.info(f"Генерация изображения: {style_prompt[:50]}...")
+        logger.info(f"🎨 Генерирую: {style_prompt[:50]}...")
         
-        # 1. DeepAI (бесплатно, без ключа)
+        # 1. Пробуем DeepAI
         try:
             async with aiohttp.ClientSession() as session:
                 url = "https://api.deepai.org/api/text2img"
                 headers = {"api-key": "quickstart-QUdJIGlzIGNvbWluZy4uLi4K"}
                 data = {"text": style_prompt}
-                async with session.post(url, data=data, headers=headers, timeout=60) as resp:
+                
+                async with session.post(url, data=data, headers=headers, timeout=30) as resp:
                     if resp.status == 200:
                         result = await resp.json()
                         if result.get('output_url'):
@@ -333,10 +337,12 @@ async def generate_image(prompt, style='realistic'):
                                     image_data = await img_resp.read()
                                     logger.info("✅ DeepAI успешно")
                                     return image_data
+                    else:
+                        logger.warning(f"DeepAI ошибка: {resp.status}")
         except Exception as e:
-            logger.warning(f"DeepAI error: {e}")
+            logger.warning(f"DeepAI исключение: {e}")
         
-        # 2. Craiyon (бесплатно, без ключа)
+        # 2. Пробуем Craiyon
         try:
             async with aiohttp.ClientSession() as session:
                 url = "https://api.craiyon.com/v3"
@@ -344,17 +350,19 @@ async def generate_image(prompt, style='realistic'):
                     "prompt": style_prompt,
                     "version": "35s9hf7d"
                 }
-                async with session.post(url, json=payload, timeout=60) as resp:
+                async with session.post(url, json=payload, timeout=30) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get('images'):
                             image_data = base64.b64decode(data['images'][0])
                             logger.info("✅ Craiyon успешно")
                             return image_data
+                    else:
+                        logger.warning(f"Craiyon ошибка: {resp.status}")
         except Exception as e:
-            logger.warning(f"Craiyon error: {e}")
+            logger.warning(f"Craiyon исключение: {e}")
         
-        # 3. Pollinations (запасной вариант)
+        # 3. Пробуем Pollinations
         try:
             encoded_prompt = urllib.parse.quote(style_prompt)
             api_url = f"{POLLINATIONS_API}{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
@@ -366,118 +374,66 @@ async def generate_image(prompt, style='realistic'):
                             logger.info("✅ Pollinations успешно")
                             return image_data
         except Exception as e:
-            logger.warning(f"Pollinations error: {e}")
+            logger.warning(f"Pollinations исключение: {e}")
         
         logger.error("❌ Все API генерации изображений не сработали")
         return None
         
     except Exception as e:
-        logger.error(f"Image generation error: {e}")
+        logger.error(f"Ошибка генерации: {e}")
         return None
 
-# ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ AI-АССИСТЕНТА (БЕЗ MATRIXHUB) ==========
+# ========== УПРОЩЕННАЯ ФУНКЦИЯ AI-АССИСТЕНТА ==========
 async def ask_ai(prompt, user_id):
-    """Запрос к AI через доступные API"""
+    """Максимально простая версия AI"""
     can, left = check_ai_limit(user_id)
     if not can:
         return "❌ Ты исчерпал лимит AI-запросов на сегодня."
     
-    logger.info(f"AI запрос от пользователя {user_id}: {prompt[:50]}...")
-
-    # 1. OpenRouter (бесплатные модели)
-    if OPENROUTER_API_KEY:
-        models_to_try = [
-            'google/gemini-1.5-flash:free',
-            'mistralai/mistral-7b-instruct:free',
-            'microsoft/phi-3-mini-128k-instruct:free'
-        ]
-        for model in models_to_try:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    url = "https://openrouter.ai/api/v1/chat/completions"
-                    headers = {
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://t.me/TikTokSavebot",
-                        "X-Title": "TikTokSavebot"
-                    }
-                    payload = {
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "temperature": 0.7,
-                        "max_tokens": 1000
-                    }
-                    async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if 'choices' in data and len(data['choices']) > 0:
-                                result = data['choices'][0]['message']['content']
-                                increment_ai_request(user_id)
-                                logger.info(f"✅ OpenRouter успешно")
-                                return result
-            except Exception as e:
-                logger.warning(f"OpenRouter error: {e}")
-                continue
-
-    # 2. ProxyAPI (российский прокси)
-    if PROXYAPI_KEY:
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://api.proxyapi.ru/deepseek/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {PROXYAPI_KEY}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу."},
-                        {"role": "user", "content": prompt}
-                    ]
-                }
-                async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
+    # Проверяем наличие ключей
+    if not OPENROUTER_API_KEY:
+        logger.error("❌ Ключ OpenRouter не найден в переменных окружения")
+        return "❌ Ошибка: ключ OpenRouter не найден. Обратись к администратору."
+    
+    logger.info(f"🤖 Отправляю запрос в OpenRouter...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://t.me/TikTokSavebot",
+                "X-Title": "TikTokSavebot"
+            }
+            payload = {
+                "model": "google/gemini-1.5-flash:free",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "max_tokens": 500
+            }
+            
+            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if 'choices' in data and len(data['choices']) > 0:
                         result = data['choices'][0]['message']['content']
                         increment_ai_request(user_id)
-                        logger.info("✅ ProxyAPI успешно")
+                        logger.info("✅ OpenRouter успешно ответил")
                         return result
-        except Exception as e:
-            logger.warning(f"ProxyAPI error: {e}")
-
-    # 3. DeepSeek (китайская модель)
-    if DEEPSEEK_API_KEY:
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://api.deepseek.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 1000
-                }
-                async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        result = data['choices'][0]['message']['content']
-                        increment_ai_request(user_id)
-                        logger.info("✅ DeepSeek успешно")
-                        return result
-        except Exception as e:
-            logger.warning(f"DeepSeek error: {e}")
-
-    logger.error("❌ Все AI API не сработали")
-    return "🤖 *AI временно недоступен*\n\nПопробуй позже или используй /draw для генерации картинок."
+                    else:
+                        logger.error(f"OpenRouter вернул неожиданный ответ: {data}")
+                        return "❌ Ошибка формата ответа от OpenRouter"
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"OpenRouter ошибка {resp.status}: {error_text[:200]}")
+                    return f"❌ Ошибка API OpenRouter: {resp.status}"
+    except asyncio.TimeoutError:
+        logger.error("OpenRouter таймаут")
+        return "❌ Таймаут при обращении к OpenRouter"
+    except Exception as e:
+        logger.error(f"OpenRouter исключение: {e}")
+        return f"❌ Ошибка соединения: {str(e)[:100]}"
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def generate_image_with_style_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -954,20 +910,25 @@ async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     
-    msg = await update.message.reply_text("🔄 Тестирую API генерации картинок...")
-    result = await generate_image("красивый закат над морем", "realistic")
+    await update.message.reply_text("🔍 Начинаю диагностику...")
+    
+    # Тест AI
+    msg = await update.message.reply_text("🔄 Тестирую AI API...")
+    response = await ask_ai("Напиши одно слово: Привет", update.effective_user.id)
+    await msg.edit_text(f"🤖 AI ответ: {response}")
+    
+    # Тест картинок
+    msg2 = await update.message.reply_text("🔄 Тестирую API картинок...")
+    result = await generate_image("красный круг", "realistic")
     if result:
         await context.bot.send_photo(
             chat_id=update.effective_user.id,
             photo=BytesIO(result),
             caption="✅ API картинок работает!"
         )
+        await msg2.delete()
     else:
-        await update.message.reply_text("❌ API картинок не работает")
-    
-    await msg.edit_text("🔄 Тестирую AI API...")
-    response = await ask_ai("Напиши короткое приветствие", update.effective_user.id)
-    await update.message.reply_text(f"🤖 AI ответ: {response}")
+        await msg2.edit_text("❌ API картинок не работает")
 
 # ========== ПРОФИЛЬ И ТАРИФЫ ==========
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
