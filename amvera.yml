@@ -1,11 +1,13 @@
 meta:
-  environment: python
+  environment: docker
   toolchain:
-    name: pip
-    version: 3.11
+    name: docker
+
 build:
-  requirementsPath: requirements.txt
+  dockerfile: Dockerfile
+
 run:
-  scriptName: bot.py
-  persistenceMount: /data          # <- эту строку проверь
+  command: python
+  args: bot.py
+  persistenceMount: /data
   containerPort: 80
