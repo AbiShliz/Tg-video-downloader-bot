@@ -52,107 +52,29 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # Путь к шрифту для мемов
 FONT_PATH = 'impact.ttf'  # лежит в корне
 
-# ========== НАСТРОЙКИ ДЛЯ ОБХОДА БЛОКИРОВОК ==========
-YDL_OPTS_COMMON = {
+# Базовые опции для yt-dlp
+YDL_OPTIONS = {
+    'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    'merge_output_format': 'mp4',
+    'postprocessors': [{
+        'key': 'FFmpegVideoConvertor',
+        'preferedformat': 'mp4',
+    }] if FFMPEG_AVAILABLE else [],
     'quiet': True,
     'no_warnings': True,
-    'extract_flat': False,
-    'ignoreerrors': True,
-    'nocheckcertificate': True,
-    'geo_bypass': True,
-    'geo_bypass_country': 'US',
 }
-
-# Заголовки как у реального браузера
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
-]
-
-# Cookie-файлы для разных платформ (можно добавить позже)
-COOKIE_FILES = {
-    'youtube': 'cookies/youtube.txt',
-    'instagram': 'cookies/instagram.txt',
-    'tiktok': 'cookies/tiktok.txt'
-}
-
-# Базовые опции для yt-dlp
-def get_base_opts():
-    """Базовые опции с случайным User-Agent"""
-    return {
-        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'merge_output_format': 'mp4',
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }] if FFMPEG_AVAILABLE else [],
-        'headers': {
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-us,en;q=0.5',
-            'Sec-Fetch-Mode': 'navigate',
-        }
-    }
 
 # Поддерживаемые платформы
 PLATFORMS = {
-    'youtube': {
-        'name': 'YouTube', 
-        'patterns': ['youtube.com', 'youtu.be'], 
-        'enabled': True,
-        'needs_cookies': True
-    },
-    'tiktok': {
-        'name': 'TikTok', 
-        'patterns': ['tiktok.com'], 
-        'enabled': True,
-        'needs_cookies': False
-    },
-    'instagram': {
-        'name': 'Instagram', 
-        'patterns': ['instagram.com'], 
-        'enabled': True,
-        'needs_cookies': True
-    },
-    'vk': {
-        'name': 'VK', 
-        'patterns': ['vk.com', 'vkontakte.ru'], 
-        'enabled': True,
-        'needs_cookies': False
-    },
-    'pinterest': {
-        'name': 'Pinterest', 
-        'patterns': ['pinterest.com', 'pin.it'], 
-        'enabled': True,
-        'needs_cookies': False
-    },
-    'twitter': {
-        'name': 'Twitter/X', 
-        'patterns': ['twitter.com', 'x.com'], 
-        'enabled': True,
-        'needs_cookies': True
-    },
-    'reddit': {
-        'name': 'Reddit', 
-        'patterns': ['reddit.com'], 
-        'enabled': True,
-        'needs_cookies': False
-    },
-    'rutube': {
-        'name': 'Rutube', 
-        'patterns': ['rutube.ru'], 
-        'enabled': True,
-        'needs_cookies': False
-    },
-    'dzen': {
-        'name': 'Дзен', 
-        'patterns': ['dzen.ru', 'zen.yandex.ru'], 
-        'enabled': True,
-        'needs_cookies': False
-    }
+    'youtube': {'name': 'YouTube', 'patterns': ['youtube.com', 'youtu.be'], 'enabled': True},
+    'tiktok': {'name': 'TikTok', 'patterns': ['tiktok.com'], 'enabled': True},
+    'instagram': {'name': 'Instagram', 'patterns': ['instagram.com'], 'enabled': True},
+    'vk': {'name': 'VK', 'patterns': ['vk.com', 'vkontakte.ru'], 'enabled': True},
+    'pinterest': {'name': 'Pinterest', 'patterns': ['pinterest.com', 'pin.it'], 'enabled': True},
+    'twitter': {'name': 'Twitter/X', 'patterns': ['twitter.com', 'x.com'], 'enabled': True},
+    'reddit': {'name': 'Reddit', 'patterns': ['reddit.com'], 'enabled': True},
+    'rutube': {'name': 'Rutube', 'patterns': ['rutube.ru'], 'enabled': True},
+    'dzen': {'name': 'Дзен', 'patterns': ['dzen.ru', 'zen.yandex.ru'], 'enabled': True}
 }
 
 # ========== ТАРИФЫ ==========
@@ -184,10 +106,8 @@ PLANS = {
 DB_PATH = '/data/users.db'
 
 def init_db():
-    """Создание базы данных"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -206,7 +126,6 @@ def init_db():
         bonus_downloads INTEGER DEFAULT 0,
         is_banned INTEGER DEFAULT 0
     )''')
-    
     conn.commit()
     conn.close()
     logger.info("✅ База данных создана/проверена")
@@ -238,12 +157,10 @@ def save_user(user_id, username, first_name, last_name):
             username = ?, first_name = ?, last_name = ?, last_active = ?
             WHERE user_id = ?''',
             (username, first_name, last_name, now, user_id))
-    
     conn.commit()
     conn.close()
 
 def check_daily_limit(user_id):
-    """Проверка дневного лимита скачиваний"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT plan, downloads_today, bonus_downloads FROM users WHERE user_id = ?", (user_id,))
@@ -252,22 +169,18 @@ def check_daily_limit(user_id):
     
     if not result:
         return True, 3
-    
     plan, today, bonus = result
     bonus = bonus or 0
     limit = PLANS[plan]['daily_limit'] + bonus
     today = today or 0
-    
     return today < limit, limit - today
 
 def increment_downloads(user_id):
-    """Увеличить счетчик скачиваний"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Если сегодня новый день, сбрасываем счетчик
     c.execute("SELECT last_download_date FROM users WHERE user_id = ?", (user_id,))
     last_date = c.fetchone()
     
@@ -280,7 +193,6 @@ def increment_downloads(user_id):
         last_active = ?,
         last_download_date = ?
         WHERE user_id = ?''', (now, today, user_id))
-    
     conn.commit()
     conn.close()
 
@@ -301,13 +213,10 @@ def update_user_plan(user_id, plan):
     conn.close()
 
 def process_referral(new_user_id, ref_code):
-    """Обработка реферального перехода"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
     c.execute("SELECT user_id FROM users WHERE referral_code = ?", (ref_code,))
     referrer = c.fetchone()
-    
     if referrer and referrer[0] != new_user_id:
         referrer_id = referrer[0]
         c.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, new_user_id))
@@ -318,7 +227,6 @@ def process_referral(new_user_id, ref_code):
         conn.commit()
         conn.close()
         return referrer_id
-    
     conn.close()
     return None
 
@@ -331,198 +239,85 @@ def get_referral_info(user_id):
     return result or (None, 0, 0)
 
 def get_stats():
-    """Получение статистики"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
-    
     today = datetime.now().strftime("%Y-%m-%d")
     c.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today}%",))
     active = c.fetchone()[0]
-    
     c.execute("SELECT SUM(total_downloads) FROM users")
     downloads = c.fetchone()[0] or 0
-    
     c.execute("SELECT plan, COUNT(*) FROM users GROUP BY plan")
     plans_stats = c.fetchall()
-    
     conn.close()
     return total, active, downloads, plans_stats
 
-# ========== ФУНКЦИИ ДЛЯ ОПРЕДЕЛЕНИЯ ПЛАТФОРМЫ ==========
 def detect_platform(url):
-    """Определяет, с какой платформы ссылка"""
     url_lower = url.lower()
-    
     for platform_id, platform in PLATFORMS.items():
         if not platform['enabled']:
             continue
         for pattern in platform['patterns']:
             if pattern in url_lower:
                 return platform_id, platform['name']
-    
     return None, "Неизвестная платформа"
 
-# ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 def get_ydl_opts_for_platform(platform):
-    """Возвращает опции для конкретной платформы с обходом блокировок"""
-    base_opts = get_base_opts()
-    
-    # Добавляем общие настройки для обхода блокировок
-    base_opts.update(YDL_OPTS_COMMON)
-    
-    # Добавляем специфические настройки для разных платформ
+    base_opts = YDL_OPTIONS.copy()
     if platform == 'vk':
         base_opts['extractor_args'] = {'vk': {'prefer_mp4': True}}
-    
     elif platform == 'twitter':
         base_opts['format'] = 'best[ext=mp4]/best'
-        base_opts['extractor_args'] = {'twitter': {'include_entities': True}}
-    
     elif platform == 'reddit':
         base_opts['format'] = 'best[ext=mp4]/best'
-    
-    elif platform == 'youtube':
-        # Специальные настройки для YouTube
-        base_opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['android', 'web', 'ios'],  # Используем разные клиенты
-                'skip': ['hls', 'dash'],  # Пропускаем ненужное
-                'include_ads': False,
-            }
-        }
-        base_opts['cookiefile'] = COOKIE_FILES.get('youtube') if os.path.exists(COOKIE_FILES.get('youtube', '')) else None
-    
-    elif platform == 'instagram':
-        base_opts['extractor_args'] = {'instagram': {'include_entities': True}}
-        base_opts['cookiefile'] = COOKIE_FILES.get('instagram') if os.path.exists(COOKIE_FILES.get('instagram', '')) else None
-    
-    elif platform == 'tiktok':
-        base_opts['extractor_args'] = {'tiktok': {'api_hostname': 'api16-normal-c-useast1a.tiktokv.com'}}
-    
     return base_opts
 
-async def download_video(url, retry_count=3):
-    """Универсальная функция скачивания видео с повторными попытками"""
-    for attempt in range(retry_count):
-        try:
-            platform_id, platform_name = detect_platform(url)
-            
-            if not platform_id:
-                return None, "❌ Платформа не поддерживается"
-            
-            logger.info(f"📥 Попытка {attempt + 1}/{retry_count} скачивания с {platform_name}: {url[:50]}...")
-            
-            # Уникальное имя файла
-            timestamp = int(time.time())
-            random_id = random.randint(1000, 9999)
-            output_template = os.path.join(DOWNLOAD_DIR, f'video_{timestamp}_{random_id}.%(ext)s')
-            
-            # Получаем опции для платформы
-            ydl_opts = get_ydl_opts_for_platform(platform_id)
-            ydl_opts['outtmpl'] = output_template
-            
-            # Скачиваем
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                
-                if info is None:
-                    if attempt < retry_count - 1:
-                        await asyncio.sleep(2)
-                        continue
-                    return None, "❌ Не удалось получить информацию о видео"
-                
-                filename = ydl.prepare_filename(info)
-                
-                # Проверяем, создался ли mp4 после конвертации
-                base = os.path.splitext(filename)[0]
-                mp4_file = f"{base}.mp4"
-                
-                if os.path.exists(mp4_file):
-                    final_file = mp4_file
-                elif os.path.exists(filename):
-                    final_file = filename
-                else:
-                    if attempt < retry_count - 1:
-                        logger.warning(f"Попытка {attempt + 1} не удалась, пробую снова...")
-                        await asyncio.sleep(2)
-                        continue
-                    return None, "❌ Не удалось найти скачанный файл"
-                
-                # Получаем информацию о видео
-                title = info.get('title', 'Без названия')
-                duration = info.get('duration', 0)
-                uploader = info.get('uploader', 'Неизвестно')
-                
-                return final_file, {
-                    'title': title,
-                    'duration': duration,
-                    'uploader': uploader,
-                    'platform': platform_name
-                }
-                
-        except Exception as e:
-            error_str = str(e)
-            logger.error(f"Ошибка скачивания (попытка {attempt + 1}): {error_str}")
-            
-            # Понятные сообщения для пользователя
-            if "Video unavailable" in error_str:
-                if attempt < retry_count - 1:
-                    await asyncio.sleep(3)
-                    continue
-                return None, "❌ Видео недоступно (удалено, с возрастным ограничением или требует cookies)"
-            
-            elif "Private video" in error_str:
-                return None, "❌ Это приватное видео, доступ ограничен"
-            
-            elif "copyright" in error_str.lower():
-                return None, "❌ Видео заблокировано по копирайту"
-            
-            elif "age" in error_str.lower() or "18" in error_str:
-                return None, "❌ Видео с возрастным ограничением (18+)"
-            
-            elif "login" in error_str.lower() or "cookie" in error_str.lower():
-                return None, "❌ Для этой платформы требуется авторизация (нужны cookies)"
-            
-            # Другие ошибки
-            if attempt < retry_count - 1:
-                await asyncio.sleep(2)
-                continue
-    
-    return None, "❌ Не удалось скачать видео после нескольких попыток"
-
-def get_video_info(url):
-    """Получить информацию о видео без скачивания"""
+async def download_video(url):
     try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-        }
+        platform_id, platform_name = detect_platform(url)
+        if not platform_id:
+            return None, "❌ Платформа не поддерживается"
+        
+        logger.info(f"📥 Скачиваю с {platform_name}: {url[:50]}...")
+        
+        timestamp = int(time.time())
+        random_id = random.randint(1000, 9999)
+        output_template = os.path.join(DOWNLOAD_DIR, f'video_{timestamp}_{random_id}.%(ext)s')
+        
+        ydl_opts = get_ydl_opts_for_platform(platform_id)
+        ydl_opts['outtmpl'] = output_template
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
             
-            title = info.get('title', 'Название не найдено')
+            base = os.path.splitext(filename)[0]
+            mp4_file = f"{base}.mp4"
+            
+            if os.path.exists(mp4_file):
+                final_file = mp4_file
+            elif os.path.exists(filename):
+                final_file = filename
+            else:
+                return None, "❌ Не удалось найти скачанный файл"
+            
+            title = info.get('title', 'Без названия')
             duration = info.get('duration', 0)
-            uploader = info.get('uploader', 'Неизвестный автор')
+            uploader = info.get('uploader', 'Неизвестно')
             
-            minutes = duration // 60
-            seconds = duration % 60
-            
-            return {
+            return final_file, {
                 'title': title,
-                'duration': f"{minutes}:{seconds:02d}",
-                'uploader': uploader
+                'duration': duration,
+                'uploader': uploader,
+                'platform': platform_name
             }
-    except:
-        return None
+            
+    except Exception as e:
+        logger.error(f"Ошибка скачивания: {e}")
+        return None, f"❌ Ошибка: {str(e)[:100]}"
 
-# ========== ФУНКЦИИ ДЛЯ СОЗДАНИЯ МЕМОВ ==========
 async def create_meme(image_path, top_text, bottom_text, output_path):
-    """Создание мема с текстом сверху и снизу"""
     try:
         img = Image.open(image_path)
         draw = ImageDraw.Draw(img)
@@ -554,20 +349,17 @@ async def create_meme(image_path, top_text, bottom_text, output_path):
         
         if top_text:
             draw_text_with_outline(top_text, int(img.height * 0.05))
-        
         if bottom_text:
             draw_text_with_outline(bottom_text, int(img.height * 0.8))
         
         img.save(output_path, quality=95)
         return True
-        
     except Exception as e:
         logger.error(f"Ошибка создания мема: {e}")
         return False
 
 # ========== КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Стартовая команда"""
     user = update.effective_user
     args = context.args
     save_user(user.id, user.username, user.first_name, user.last_name)
@@ -595,41 +387,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Помощь"""
     text = (
         "📖 *Помощь*\n\n"
-        "🔹 *Скачивание видео:*\n"
-        "Просто отправь ссылку на видео\n\n"
-        "🔹 *Создание мемов:*\n"
-        "/meme текст — ответом на картинку\n"
-        "Формат: /meme Текст сверху | Текст снизу\n\n"
-        "🔹 *Команды:*\n"
-        "/start — начало\n"
-        "/plan — тарифы\n"
-        "/profile — профиль\n"
-        "/ref — рефералы\n"
-        "/help — помощь"
+        "🔹 *Скачивание видео:* просто отправь ссылку\n"
+        "🔹 *Создание мемов:* /meme текст (ответом на фото)\n"
+        "🔹 *Команды:* /start, /plan, /profile, /ref, /help"
     )
-    
-    user_id = update.effective_user.id
-    if user_id == ADMIN_ID:
-        text += "\n\n🔹 *Админ-команды:*\n"
-        text += "/stats — статистика\n"
-        text += "/whois — инфо о пользователе\n"
-        text += "/ban /unban — блокировка\n"
-        text += "/broadcast — рассылка\n"
-        text += "/setplan — выдать тариф\n"
-        text += "/addbonus — добавить бонусы\n"
-        text += "/resetlimit — сбросить лимиты\n"
-        text += "/backup — бэкап\n"
-        text += "/export — экспорт CSV\n"
-        text += "/ping — проверка\n"
-        text += "/restart — перезапуск"
-    
+    if update.effective_user.id == ADMIN_ID:
+        text += "\n\n🔹 *Админ-команды:* /stats, /whois, /ban, /unban, /broadcast, /setplan, /addbonus, /resetlimit, /backup, /export, /ping, /restart"
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Профиль пользователя"""
     user = update.effective_user
     user_id = user.id
     save_user(user_id, user.username, user.first_name, user.last_name)
@@ -667,11 +435,9 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать тарифы"""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -685,10 +451,12 @@ async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     
     for pid, plan in PLANS.items():
+        if pid == 'basic':
+            continue
         text += f"{plan['name']}\n"
         text += f"💰 {plan['price']} ★ / месяц\n"
         text += "▸ " + "\n▸ ".join(plan['features']) + "\n\n"
-        if pid != 'basic' and edit:
+        if edit:
             keyboard.append([InlineKeyboardButton(f"✅ Купить {plan['name']}", callback_data=f"buy_{pid}")])
     
     if edit:
@@ -699,7 +467,6 @@ async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, parse_mode='Markdown')
 
 async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Реферальная программа"""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -722,8 +489,7 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Приглашено друзей: {count}\n"
         f"• Бонус: +{bonus} скачиваний/день\n\n"
         f"🎁 *Как это работает:*\n"
-        f"За каждого друга ты получаешь:\n"
-        f"• +3 скачивания в день навсегда"
+        f"За каждого друга ты получаешь +3 скачивания в день навсегда"
     )
     
     keyboard = []
@@ -735,57 +501,17 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, parse_mode='Markdown')
 
 async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Возврат в профиль"""
     query = update.callback_query
     await query.answer()
-    
-    user_id = query.from_user.id
-    plan, expiry = get_user_plan(user_id)
-    plan_name = PLANS[plan]['name']
-    
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''SELECT downloads_today, total_downloads, bonus_downloads, referral_count
-                 FROM users WHERE user_id = ?''', (user_id,))
-    data = c.fetchone()
-    conn.close()
-    
-    today = data[0] if data else 0
-    total = data[1] if data else 0
-    bonus = data[2] if data else 0
-    refs = data[3] if data else 0
-    
-    limit = PLANS[plan]['daily_limit'] + bonus
-    expiry_text = f"до {expiry}" if expiry else "бессрочно"
-    
-    text = (
-        f"👤 *Твой профиль*\n\n"
-        f"💎 *Тариф:* {plan_name}\n"
-        f"⏳ Действует: {expiry_text}\n\n"
-        f"📥 *Сегодня:* {today}/{limit} скачиваний\n"
-        f"📊 *Всего:* {total} скачиваний\n"
-        f"👥 *Рефералов:* {refs}\n"
-        f"🎁 *Бонус:* +{bonus} скачиваний/день"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
-        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    await profile_cmd(update, context)
 
-# ========== КОМАНДА ДЛЯ МЕМОВ ==========
 async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание мема: /meme Текст сверху | Текст снизу"""
     user_id = update.effective_user.id
     plan, _ = get_user_plan(user_id)
     
     if plan == 'basic':
         await update.message.reply_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*\n\n"
-            "Купи подписку /plan чтобы создавать мемы",
+            "❌ *Функция доступна только с тарифом Стартовый и выше*",
             parse_mode='Markdown'
         )
         return
@@ -793,9 +519,7 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ' '.join(context.args) if context.args else ""
     if not text:
         await update.message.reply_text(
-            "❓ Использование: /meme текст\n\n"
-            "Пример: /meme Когда увидел баг | Но это фича\n\n"
-            "Ответь этой командой на картинку"
+            "❓ Использование: /meme текст\nПример: /meme Когда увидел баг | Но это фича"
         )
         return
     
@@ -825,11 +549,7 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if success and os.path.exists(output_path):
             with open(output_path, 'rb') as f:
-                await update.message.reply_photo(
-                    photo=f,
-                    caption=f"🎭 *Мем готов!*",
-                    parse_mode='Markdown'
-                )
+                await update.message.reply_photo(photo=f, caption=f"🎭 *Мем готов!*", parse_mode='Markdown')
             await status_msg.delete()
         else:
             await status_msg.edit_text("❌ Не удалось создать мем")
@@ -845,7 +565,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ПЛАТЕЖИ ==========
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка покупки тарифа"""
     query = update.callback_query
     await query.answer()
     plan_id = query.data.replace('buy_', '')
@@ -862,11 +581,9 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Предпроверка платежа"""
     await update.pre_checkout_query.answer(ok=True)
 
 async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Успешная оплата"""
     user_id = update.effective_user.id
     payload = update.message.successful_payment.invoice_payload
     
@@ -880,7 +597,6 @@ async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== АДМИН-КОМАНДЫ ==========
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Статистика"""
     if update.effective_user.id != ADMIN_ID:
         return
     total, active, downloads, plans_stats = get_stats()
@@ -890,14 +606,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Информация о пользователе"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
     if not args:
         await update.message.reply_text("Использование: /whois <user_id или @username>")
         return
-    
     target = args[0]
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -941,7 +655,6 @@ Username: @{user[1] or 'нет'}
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Заблокировать пользователя"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -960,7 +673,6 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Разблокировать пользователя"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -979,7 +691,6 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Рассылка сообщения"""
     if update.effective_user.id != ADMIN_ID:
         return
     text = ' '.join(context.args)
@@ -1004,7 +715,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Рассылка завершена\nОтправлено: {sent}\nОшибок: {failed}")
 
 async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выдать тариф"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -1023,7 +733,6 @@ async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавить бонусы"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -1043,7 +752,6 @@ async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сбросить лимиты"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -1062,7 +770,6 @@ async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Бэкап базы данных"""
     if update.effective_user.id != ADMIN_ID:
         return
     try:
@@ -1079,7 +786,6 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Экспорт пользователей в CSV"""
     if update.effective_user.id != ADMIN_ID:
         return
     try:
@@ -1103,30 +809,25 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка соединения"""
     if update.effective_user.id != ADMIN_ID:
         return
     start = time.time()
     msg = await update.message.reply_text("🏓 Pong...")
     end = time.time()
-    await msg.edit_text(f"🏓 Pong!\nЗадержка: {round((end - start) * 1000)}ms")
+    await msg.edit_text(f"🏓 Pong! {round((end-start)*1000)}ms")
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Перезапуск бота"""
     if update.effective_user.id != ADMIN_ID:
         return
     await update.message.reply_text("🔄 Перезапускаюсь...")
-    logger.info("Перезапуск по команде админа")
     os._exit(0)
 
 # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ссылок"""
     user = update.effective_user
     user_id = user.id
     text = update.message.text.strip()
     
-    # Проверка на бан
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
@@ -1139,10 +840,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
-    # Проверяем, является ли сообщение ссылкой
     if 'http://' in text or 'https://' in text or 'www.' in text:
-        
-        # Проверка лимита
         can, left = check_daily_limit(user_id)
         if not can:
             await update.message.reply_text(
@@ -1151,38 +849,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Определяем платформу
         platform_id, platform_name = detect_platform(text)
         if not platform_id:
-            await update.message.reply_text(
-                f"❌ Платформа не поддерживается\n\nПоддерживаемые платформы: YouTube, TikTok, Instagram, VK, Pinterest, Twitter/X, Reddit, Rutube, Дзен"
-            )
+            await update.message.reply_text("❌ Платформа не поддерживается")
             return
         
-        # Показываем, что бот печатает
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_video")
         msg = await update.message.reply_text(f"📥 Скачиваю с {platform_name}...")
         
-        # Скачиваем
         result, info = await download_video(text)
         
         if not result:
             await msg.edit_text(f"❌ {info}")
             return
         
-        # Проверяем размер
-        file_size = os.path.getsize(result) / (1024 * 1024)  # в МБ
+        file_size = os.path.getsize(result) / (1024 * 1024)
         max_size = PLANS[get_user_plan(user_id)[0]]['max_size_mb']
         
         if file_size > max_size:
-            await msg.edit_text(
-                f"❌ Видео слишком большое ({file_size:.1f} МБ)\n"
-                f"Твой тариф позволяет до {max_size} МБ"
-            )
+            await msg.edit_text(f"❌ Видео слишком большое ({file_size:.1f} МБ)")
             os.remove(result)
             return
         
-        # Отправляем видео
         try:
             with open(result, 'rb') as f:
                 caption = f"📹 *{info['title'][:50]}*" if info['title'] else None
@@ -1192,25 +879,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='Markdown' if caption else None,
                     supports_streaming=True
                 )
-            
             increment_downloads(user_id)
             await msg.delete()
-            
         except Exception as e:
             logger.error(f"Ошибка отправки: {e}")
             await msg.edit_text("❌ Ошибка при отправке видео")
-        
         finally:
-            # Удаляем файл
             if os.path.exists(result):
                 os.remove(result)
-    
     else:
-        # Если не ссылка - показываем список команд
         await update.message.reply_text(
             "📤 Отправь ссылку на видео, чтобы скачать его\n\n"
             "Доступные команды:\n"
-            "/meme — создать мем из картинки\n"
+            "/meme — создать мем\n"
             "/profile — профиль\n"
             "/plan — тарифы\n"
             "/ref — рефералы"
@@ -1219,31 +900,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ЗАПУСК ==========
 def main():
     os.makedirs('/data', exist_ok=True)
-    
-    # Создаем папку для cookies (опционально)
-    os.makedirs('cookies', exist_ok=True)
-    
     init_db()
-    
-    # Проверка наличия ffmpeg
-    if FFMPEG_AVAILABLE:
-        logger.info("✅ FFmpeg установлен, видео будут со звуком")
-    else:
-        logger.warning("⚠️ FFmpeg не найден! Видео могут быть без звука.")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CommandHandler("plan", plans_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
-    
-    # Команда для мемов
     app.add_handler(CommandHandler("meme", meme_command))
     
-    # Админ-команды
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("whois", whois_command))
     app.add_handler(CommandHandler("ban", ban_command))
@@ -1257,20 +924,16 @@ def main():
     app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CommandHandler("restart", restart_command))
     
-    # Callback-обработчики
     app.add_handler(CallbackQueryHandler(plans_cmd, pattern="^plans$"))
     app.add_handler(CallbackQueryHandler(ref_cmd, pattern="^ref$"))
     app.add_handler(CallbackQueryHandler(back_profile, pattern="^back_profile$"))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
     
-    # Платежи
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_success))
-    
-    # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот для скачивания видео и создания мемов запущен")
+    logger.info("✅ Бот запущен")
     app.run_polling()
 
 if __name__ == '__main__':
