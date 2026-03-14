@@ -1,4 +1,3 @@
-
 import os
 import logging
 import sqlite3
@@ -44,7 +43,7 @@ try:
     FFMPEG_AVAILABLE = True
     logger.info("✅ FFmpeg установлен")
 except:
-    logger.warning("⚠️ FFmpeg не найден! Функции конвертации будут недоступны")
+    logger.warning("⚠️ FFmpeg не найден! Видео могут быть без звука")
 
 # ========== НАСТРОЙКИ ==========
 DOWNLOAD_DIR = 'downloads'
@@ -92,7 +91,7 @@ PLANS = {
         'price': 25,
         'daily_limit': 30,
         'max_size_mb': 500,
-        'features': ['30 видео/день', 'MP4 со звуком', 'до 500 МБ', 'Поиск музыки', 'Мемы', 'Приоритет']
+        'features': ['30 видео/день', 'MP4 со звуком', 'до 500 МБ', 'Мемы', 'Приоритет']
     },
     'premium': {
         'name': '💎 Премиум',
@@ -107,8 +106,10 @@ PLANS = {
 DB_PATH = '/data/users.db'
 
 def init_db():
+    """Создание базы данных"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -127,6 +128,7 @@ def init_db():
         bonus_downloads INTEGER DEFAULT 0,
         is_banned INTEGER DEFAULT 0
     )''')
+    
     conn.commit()
     conn.close()
     logger.info("✅ База данных создана/проверена")
@@ -163,6 +165,7 @@ def save_user(user_id, username, first_name, last_name):
     conn.close()
 
 def check_daily_limit(user_id):
+    """Проверка дневного лимита скачиваний"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT plan, downloads_today, bonus_downloads FROM users WHERE user_id = ?", (user_id,))
@@ -180,11 +183,13 @@ def check_daily_limit(user_id):
     return today < limit, limit - today
 
 def increment_downloads(user_id):
+    """Увеличить счетчик скачиваний"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    # Если сегодня новый день, сбрасываем счетчик
     c.execute("SELECT last_download_date FROM users WHERE user_id = ?", (user_id,))
     last_date = c.fetchone()
     
@@ -218,8 +223,10 @@ def update_user_plan(user_id, plan):
     conn.close()
 
 def process_referral(new_user_id, ref_code):
+    """Обработка реферального перехода"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute("SELECT user_id FROM users WHERE referral_code = ?", (ref_code,))
     referrer = c.fetchone()
     
@@ -246,61 +253,80 @@ def get_referral_info(user_id):
     return result or (None, 0, 0)
 
 def get_stats():
+    """Получение статистики"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
+    
     today = datetime.now().strftime("%Y-%m-%d")
     c.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today}%",))
     active = c.fetchone()[0]
+    
     c.execute("SELECT SUM(total_downloads) FROM users")
     downloads = c.fetchone()[0] or 0
+    
     c.execute("SELECT plan, COUNT(*) FROM users GROUP BY plan")
     plans_stats = c.fetchall()
+    
     conn.close()
     return total, active, downloads, plans_stats
 
 # ========== ФУНКЦИИ ДЛЯ ОПРЕДЕЛЕНИЯ ПЛАТФОРМЫ ==========
 def detect_platform(url):
+    """Определяет, с какой платформы ссылка"""
     url_lower = url.lower()
+    
     for platform_id, platform in PLATFORMS.items():
         if not platform['enabled']:
             continue
         for pattern in platform['patterns']:
             if pattern in url_lower:
                 return platform_id, platform['name']
+    
     return None, "Неизвестная платформа"
 
 # ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 def get_ydl_opts_for_platform(platform):
+    """Возвращает опции для конкретной платформы"""
     base_opts = YDL_OPTIONS.copy()
+    
+    # Специфические настройки для разных платформ
     if platform == 'vk':
         base_opts['extractor_args'] = {'vk': {'prefer_mp4': True}}
     elif platform == 'twitter':
         base_opts['format'] = 'best[ext=mp4]/best'
     elif platform == 'reddit':
         base_opts['format'] = 'best[ext=mp4]/best'
+    
     return base_opts
 
 async def download_video(url):
+    """Универсальная функция скачивания видео"""
     try:
         platform_id, platform_name = detect_platform(url)
+        
         if not platform_id:
             return None, "❌ Платформа не поддерживается"
         
         logger.info(f"📥 Скачиваю с {platform_name}: {url[:50]}...")
         
+        # Уникальное имя файла
         timestamp = int(time.time())
         random_id = random.randint(1000, 9999)
         output_template = os.path.join(DOWNLOAD_DIR, f'video_{timestamp}_{random_id}.%(ext)s')
         
+        # Получаем опции для платформы
         ydl_opts = get_ydl_opts_for_platform(platform_id)
         ydl_opts['outtmpl'] = output_template
         
+        # Скачиваем
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
+            # Проверяем, создался ли mp4 после конвертации
             base = os.path.splitext(filename)[0]
             mp4_file = f"{base}.mp4"
             
@@ -311,6 +337,7 @@ async def download_video(url):
             else:
                 return None, "❌ Не удалось найти скачанный файл"
             
+            # Получаем информацию о видео
             title = info.get('title', 'Без названия')
             duration = info.get('duration', 0)
             uploader = info.get('uploader', 'Неизвестно')
@@ -326,78 +353,32 @@ async def download_video(url):
         logger.error(f"Ошибка скачивания: {e}")
         return None, f"❌ Ошибка: {str(e)[:100]}"
 
-# ========== ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ДЛЯ ПОИСКА МУЗЫКИ ==========
-async def search_youtube(query, max_results=5):
-    """Быстрый поиск видео на YouTube"""
+def get_video_info(url):
+    """Получить информацию о видео без скачивания"""
     try:
-        # Оптимизированные опции для быстрого поиска
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': 'in_playlist',  # Быстрее, чем extract_flat
-            'force_generic_extractor': False,
-            'youtube_include_dash_manifest': False,  # Отключаем лишнее
+            'extract_flat': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Уменьшаем количество результатов для скорости
-            search_query = f"ytsearch{max_results}:{query}"
-            info = ydl.extract_info(search_query, download=False)
+            info = ydl.extract_info(url, download=False)
             
-            results = []
-            if 'entries' in info:
-                for entry in info['entries']:
-                    # Берем только нужные поля
-                    results.append({
-                        'id': entry.get('id'),
-                        'title': entry.get('title', 'Без названия')[:60],  # Обрезаем длинные названия
-                        'duration': entry.get('duration'),
-                        'url': f"https://youtu.be/{entry.get('id')}",
-                        'channel': entry.get('channel', 'Неизвестно')[:30]
-                    })
-            return results[:max_results]
+            title = info.get('title', 'Название не найдено')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Неизвестный автор')
             
-    except Exception as e:
-        logger.error(f"Ошибка поиска: {e}")
-        return []
-
-async def download_audio(url, user_id):
-    """Скачивание аудио с YouTube в MP3"""
-    if not FFMPEG_AVAILABLE:
-        return None, "❌ FFmpeg не установлен на сервере. Скачивание музыки временно недоступно."
-    
-    try:
-        timestamp = int(time.time())
-        output_template = os.path.join(DOWNLOAD_DIR, f'audio_{timestamp}_{user_id}.%(ext)s')
-        
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': output_template,
-            'quiet': True,
-            'no_warnings': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            minutes = duration // 60
+            seconds = duration % 60
             
-            base = os.path.splitext(filename)[0]
-            mp3_file = f"{base}.mp3"
-            
-            if os.path.exists(mp3_file):
-                title = info.get('title', 'Аудио')[:60]
-                uploader = info.get('uploader', 'Неизвестно')[:30]
-                return mp3_file, {'title': title, 'performer': uploader}
-            return None, "❌ Не удалось создать MP3"
-            
-    except Exception as e:
-        logger.error(f"Ошибка скачивания аудио: {e}")
-        return None, f"❌ Ошибка: {str(e)[:100]}"
+            return {
+                'title': title,
+                'duration': f"{minutes}:{seconds:02d}",
+                'uploader': uploader
+            }
+    except:
+        return None
 
 # ========== ФУНКЦИИ ДЛЯ СОЗДАНИЯ МЕМОВ ==========
 async def create_meme(image_path, top_text, bottom_text, output_path):
@@ -446,6 +427,7 @@ async def create_meme(image_path, top_text, bottom_text, output_path):
 
 # ========== КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Стартовая команда"""
     user = update.effective_user
     args = context.args
     save_user(user.id, user.username, user.first_name, user.last_name)
@@ -462,7 +444,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🎬 *TikTokSavebot*\n\n"
         "📥 *Скачивание видео:* просто отправь ссылку\n"
-        "🔍 *Поиск музыки:* /search запрос\n"
         "🎭 *Создание мемов:* /meme текст (ответом на фото)\n\n"
         "🔹 *Поддерживаемые платформы:*\n"
         "YouTube, TikTok, Instagram, VK, Pinterest, Twitter/X, Reddit, Rutube, Дзен\n\n"
@@ -474,13 +455,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Помощь"""
     text = (
         "📖 *Помощь*\n\n"
         "🔹 *Скачивание видео:*\n"
         "Просто отправь ссылку на видео\n\n"
-        "🔹 *Поиск музыки:*\n"
-        "/search <название> — найти и скачать MP3\n"
-        "Пример: /search Queen Bohemian Rhapsody\n\n"
         "🔹 *Создание мемов:*\n"
         "/meme текст — ответом на картинку\n"
         "Формат: /meme Текст сверху | Текст снизу\n\n"
@@ -510,6 +489,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Профиль пользователя"""
     user = update.effective_user
     user_id = user.id
     save_user(user_id, user.username, user.first_name, user.last_name)
@@ -547,9 +527,11 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать тарифы"""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -577,6 +559,7 @@ async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, parse_mode='Markdown')
 
 async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Реферальная программа"""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -612,6 +595,7 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, parse_mode='Markdown')
 
 async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возврат в профиль"""
     query = update.callback_query
     await query.answer()
     
@@ -649,122 +633,8 @@ async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-
-# ========== ОПТИМИЗИРОВАННАЯ КОМАНДА ПОИСКА МУЗЫКИ ==========
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск музыки по текстовому запросу"""
-    user_id = update.effective_user.id
-    
-    # Проверка тарифа
-    plan, _ = get_user_plan(user_id)
-    if plan == 'basic':
-        await update.message.reply_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*\n\n"
-            "Купи подписку /plan чтобы искать и скачивать музыку",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Проверка FFmpeg
-    if not FFMPEG_AVAILABLE:
-        await update.message.reply_text(
-            "❌ *FFmpeg не установлен на сервере*\n\n"
-            "Скачивание музыки временно недоступно. Администратор уже знает о проблеме.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    query = ' '.join(context.args) if context.args else None
-    
-    if not query:
-        await update.message.reply_text(
-            "❓ Использование: /search <название песни>\n\n"
-            "Пример: /search Queen Bohemian Rhapsody"
-        )
-        return
-    
-    # Показываем, что бот печатает
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    status_msg = await update.message.reply_text(f"🔍 Ищу: {query}...")
-    
-    # Выполняем поиск (максимум 3 результата для скорости)
-    results = await search_youtube(query, max_results=3)
-    
-    if not results:
-        await status_msg.edit_text("❌ Ничего не найдено. Попробуй другой запрос.")
-        return
-    
-    # Создаем клавиатуру с результатами
-    keyboard = []
-    for i, result in enumerate(results):
-        duration = result['duration']
-        if duration:
-            minutes = duration // 60
-            seconds = duration % 60
-            duration_str = f"{minutes}:{seconds:02d}"
-        else:
-            duration_str = "?"
-        
-        button_text = f"{i+1}. {result['title'][:40]} ({duration_str})"
-        keyboard.append([InlineKeyboardButton(
-            button_text, 
-            callback_data=f"music_{result['id']}"
-        )])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await status_msg.edit_text(
-        f"🔍 *Результаты поиска* для: {query}\n\nВыбери трек для скачивания:",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
-    
-    context.user_data['search_results'] = results
-
-async def music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивание выбранного трека"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    plan, _ = get_user_plan(user_id)
-    if plan == 'basic':
-        await query.edit_message_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    video_id = query.data.replace('music_', '')
-    
-    await context.bot.send_chat_action(chat_id=user_id, action="upload_audio")
-    status_msg = await query.edit_message_text("🎵 Скачиваю аудио...")
-    
-    try:
-        url = f"https://youtu.be/{video_id}"
-        
-        result, info = await download_audio(url, user_id)
-        
-        if result and os.path.exists(result):
-            with open(result, 'rb') as f:
-                await context.bot.send_audio(
-                    chat_id=user_id,
-                    audio=f,
-                    title=info.get('title', 'Аудио'),
-                    performer=info.get('performer', 'Неизвестно'),
-                    caption="✅ Готово!"
-                )
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text(f"❌ {info if isinstance(info, str) else 'Не удалось скачать аудио'}")
-            
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await status_msg.edit_text("❌ Ошибка при скачивании")
-    finally:
-        if result and os.path.exists(result):
-            os.remove(result)
 
 # ========== КОМАНДА ДЛЯ МЕМОВ ==========
 async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -835,6 +705,7 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ПЛАТЕЖИ ==========
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка покупки тарифа"""
     query = update.callback_query
     await query.answer()
     plan_id = query.data.replace('buy_', '')
@@ -851,9 +722,11 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Предпроверка платежа"""
     await update.pre_checkout_query.answer(ok=True)
 
 async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Успешная оплата"""
     user_id = update.effective_user.id
     payload = update.message.successful_payment.invoice_payload
     
@@ -867,6 +740,7 @@ async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== АДМИН-КОМАНДЫ ==========
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика"""
     if update.effective_user.id != ADMIN_ID:
         return
     total, active, downloads, plans_stats = get_stats()
@@ -876,6 +750,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о пользователе"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -926,6 +801,7 @@ Username: @{user[1] or 'нет'}
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Заблокировать пользователя"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -944,6 +820,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Разблокировать пользователя"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -962,6 +839,7 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка сообщения"""
     if update.effective_user.id != ADMIN_ID:
         return
     text = ' '.join(context.args)
@@ -986,6 +864,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Рассылка завершена\nОтправлено: {sent}\nОшибок: {failed}")
 
 async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выдать тариф"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -1004,6 +883,7 @@ async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавить бонусы"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -1023,6 +903,7 @@ async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбросить лимиты"""
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
@@ -1041,6 +922,7 @@ async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Бэкап базы данных"""
     if update.effective_user.id != ADMIN_ID:
         return
     try:
@@ -1057,6 +939,7 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Экспорт пользователей в CSV"""
     if update.effective_user.id != ADMIN_ID:
         return
     try:
@@ -1080,6 +963,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка соединения"""
     if update.effective_user.id != ADMIN_ID:
         return
     start = time.time()
@@ -1088,6 +972,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(f"🏓 Pong!\nЗадержка: {round((end - start) * 1000)}ms")
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Перезапуск бота"""
     if update.effective_user.id != ADMIN_ID:
         return
     await update.message.reply_text("🔄 Перезапускаюсь...")
@@ -1096,10 +981,12 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ссылок"""
     user = update.effective_user
     user_id = user.id
     text = update.message.text.strip()
     
+    # Проверка на бан
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
@@ -1112,7 +999,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
+    # Проверяем, является ли сообщение ссылкой
     if 'http://' in text or 'https://' in text or 'www.' in text:
+        
+        # Проверка лимита
         can, left = check_daily_limit(user_id)
         if not can:
             await update.message.reply_text(
@@ -1121,6 +1011,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Определяем платформу
         platform_id, platform_name = detect_platform(text)
         if not platform_id:
             await update.message.reply_text(
@@ -1128,16 +1019,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Показываем, что бот печатает
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_video")
         msg = await update.message.reply_text(f"📥 Скачиваю с {platform_name}...")
         
+        # Скачиваем
         result, info = await download_video(text)
         
         if not result:
             await msg.edit_text(f"❌ {info}")
             return
         
-        file_size = os.path.getsize(result) / (1024 * 1024)
+        # Проверяем размер
+        file_size = os.path.getsize(result) / (1024 * 1024)  # в МБ
         max_size = PLANS[get_user_plan(user_id)[0]]['max_size_mb']
         
         if file_size > max_size:
@@ -1148,6 +1042,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(result)
             return
         
+        # Отправляем видео
         try:
             with open(result, 'rb') as f:
                 caption = f"📹 *{info['title'][:50]}*" if info['title'] else None
@@ -1166,14 +1061,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ Ошибка при отправке видео")
         
         finally:
+            # Удаляем файл
             if os.path.exists(result):
                 os.remove(result)
     
     else:
+        # Если не ссылка - показываем список команд
         await update.message.reply_text(
             "📤 Отправь ссылку на видео, чтобы скачать его\n\n"
             "Доступные команды:\n"
-            "/search — поиск музыки\n"
             "/meme — создать мем из картинки\n"
             "/profile — профиль\n"
             "/plan — тарифы\n"
@@ -1185,6 +1081,12 @@ def main():
     os.makedirs('/data', exist_ok=True)
     init_db()
     
+    # Проверка наличия ffmpeg
+    if FFMPEG_AVAILABLE:
+        logger.info("✅ FFmpeg установлен, видео будут со звуком")
+    else:
+        logger.warning("⚠️ FFmpeg не найден! Видео могут быть без звука.")
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Основные команды
@@ -1194,8 +1096,7 @@ def main():
     app.add_handler(CommandHandler("plan", plans_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
     
-    # Новые команды
-    app.add_handler(CommandHandler("search", search_command))
+    # Команда для мемов
     app.add_handler(CommandHandler("meme", meme_command))
     
     # Админ-команды
@@ -1217,7 +1118,6 @@ def main():
     app.add_handler(CallbackQueryHandler(ref_cmd, pattern="^ref$"))
     app.add_handler(CallbackQueryHandler(back_profile, pattern="^back_profile$"))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
-    app.add_handler(CallbackQueryHandler(music_callback, pattern="^music_"))
     
     # Платежи
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
@@ -1226,7 +1126,7 @@ def main():
     # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот с функциями скачивания, поиска музыки и мемов запущен")
+    logger.info("✅ Бот для скачивания видео и создания мемов запущен")
     app.run_polling()
 
 if __name__ == '__main__':
