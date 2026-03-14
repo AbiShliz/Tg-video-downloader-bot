@@ -1,3 +1,4 @@
+
 import os
 import logging
 import sqlite3
@@ -325,34 +326,37 @@ async def download_video(url):
         logger.error(f"Ошибка скачивания: {e}")
         return None, f"❌ Ошибка: {str(e)[:100]}"
 
-# ========== ФУНКЦИИ ДЛЯ ПОИСКА И СКАЧИВАНИЯ МУЗЫКИ ==========
+# ========== ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ДЛЯ ПОИСКА МУЗЫКИ ==========
 async def search_youtube(query, max_results=5):
-    """Поиск видео на YouTube по запросу"""
+    """Быстрый поиск видео на YouTube"""
     try:
+        # Оптимизированные опции для быстрого поиска
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True,
+            'extract_flat': 'in_playlist',  # Быстрее, чем extract_flat
             'force_generic_extractor': False,
+            'youtube_include_dash_manifest': False,  # Отключаем лишнее
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Уменьшаем количество результатов для скорости
             search_query = f"ytsearch{max_results}:{query}"
             info = ydl.extract_info(search_query, download=False)
             
             results = []
             if 'entries' in info:
                 for entry in info['entries']:
-                    # Пропускаем shorts
-                    if entry.get('title') and not entry.get('title', '').startswith('#shorts'):
-                        results.append({
-                            'id': entry.get('id'),
-                            'title': entry.get('title'),
-                            'duration': entry.get('duration'),
-                            'url': f"https://youtu.be/{entry.get('id')}",
-                            'channel': entry.get('channel', 'Неизвестно')
-                        })
+                    # Берем только нужные поля
+                    results.append({
+                        'id': entry.get('id'),
+                        'title': entry.get('title', 'Без названия')[:60],  # Обрезаем длинные названия
+                        'duration': entry.get('duration'),
+                        'url': f"https://youtu.be/{entry.get('id')}",
+                        'channel': entry.get('channel', 'Неизвестно')[:30]
+                    })
             return results[:max_results]
+            
     except Exception as e:
         logger.error(f"Ошибка поиска: {e}")
         return []
@@ -386,9 +390,8 @@ async def download_audio(url, user_id):
             mp3_file = f"{base}.mp3"
             
             if os.path.exists(mp3_file):
-                # Получаем информацию для тегов
-                title = info.get('title', 'Аудио')
-                uploader = info.get('uploader', 'Неизвестно')
+                title = info.get('title', 'Аудио')[:60]
+                uploader = info.get('uploader', 'Неизвестно')[:30]
                 return mp3_file, {'title': title, 'performer': uploader}
             return None, "❌ Не удалось создать MP3"
             
@@ -648,7 +651,7 @@ async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ========== НОВАЯ КОМАНДА ДЛЯ ПОИСКА МУЗЫКИ ==========
+# ========== ОПТИМИЗИРОВАННАЯ КОМАНДА ПОИСКА МУЗЫКИ ==========
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Поиск музыки по текстовому запросу"""
     user_id = update.effective_user.id
@@ -681,10 +684,12 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Показываем, что бот печатает
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     status_msg = await update.message.reply_text(f"🔍 Ищу: {query}...")
     
-    # Выполняем поиск
-    results = await search_youtube(query, max_results=5)
+    # Выполняем поиск (максимум 3 результата для скорости)
+    results = await search_youtube(query, max_results=3)
     
     if not results:
         await status_msg.edit_text("❌ Ничего не найдено. Попробуй другой запрос.")
@@ -701,7 +706,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             duration_str = "?"
         
-        button_text = f"{i+1}. {result['title'][:45]} ({duration_str})"
+        button_text = f"{i+1}. {result['title'][:40]} ({duration_str})"
         keyboard.append([InlineKeyboardButton(
             button_text, 
             callback_data=f"music_{result['id']}"
@@ -714,10 +719,8 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
     
-    # Сохраняем результаты в контексте
     context.user_data['search_results'] = results
 
-# ========== ОБРАБОТЧИК ВЫБОРА ТРЕКА ==========
 async def music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Скачивание выбранного трека"""
     query = update.callback_query
@@ -725,18 +728,17 @@ async def music_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     
-    # Проверка тарифа
     plan, _ = get_user_plan(user_id)
     if plan == 'basic':
         await query.edit_message_text(
-            "❌ *Функция доступна только с тарифом Стартовый и выше*\n\n"
-            "Купи подписку /plan чтобы искать и скачивать музыку",
+            "❌ *Функция доступна только с тарифом Стартовый и выше*",
             parse_mode='Markdown'
         )
         return
     
     video_id = query.data.replace('music_', '')
     
+    await context.bot.send_chat_action(chat_id=user_id, action="upload_audio")
     status_msg = await query.edit_message_text("🎵 Скачиваю аудио...")
     
     try:
@@ -863,7 +865,7 @@ async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-# ========== АДМИН-КОМАНДЫ (сокращенно) ==========
+# ========== АДМИН-КОМАНДЫ ==========
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1110,9 +1112,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     save_user(user_id, user.username, user.first_name, user.last_name)
     
-    # Проверяем, является ли сообщение ссылкой
     if 'http://' in text or 'https://' in text or 'www.' in text:
-        
         can, left = check_daily_limit(user_id)
         if not can:
             await update.message.reply_text(
@@ -1128,6 +1128,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_video")
         msg = await update.message.reply_text(f"📥 Скачиваю с {platform_name}...")
         
         result, info = await download_video(text)
