@@ -29,22 +29,27 @@ logger = logging.getLogger(__name__)
 # Токен из переменных окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не найден!")
+    raise ValueError("❌ BOT_TOKEN не найден!")
 
 # Твой Telegram ID (админ)
 ADMIN_ID = 920343231
 
 # ========== API КЛЮЧИ ==========
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
 # Логируем наличие ключей
-if OPENROUTER_API_KEY:
-    logger.info(f"✅ OpenRouter ключ найден: {OPENROUTER_API_KEY[:10]}...")
+if DEEPSEEK_API_KEY:
+    logger.info(f"✅ DeepSeek ключ найден: {DEEPSEEK_API_KEY[:10]}...")
 else:
-    logger.error("❌ OpenRouter ключ НЕ НАЙДЕН!")
+    logger.warning("❌ DeepSeek ключ НЕ НАЙДЕН")
+
+if OPENROUTER_API_KEY:
+    logger.info(f"✅ OpenRouter ключ найден (запасной)")
 
 # ========== НАСТРОЙКИ API ==========
 POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
+POLLINATIONS_FALLBACK = "https://pollinations.ai/p/"
 
 IMAGE_STYLES = {
     'realistic': 'фотореализм, высокое качество, 4k, детализировано',
@@ -70,7 +75,7 @@ PLANS = {
         'download_limit': 3,
         'ai_limit': 5,
         'image_limit': 2,
-        'features': ['3 видео/день', '5 AI-запросов/день', '2 изображения/день', '480p']
+        'features': ['3 видео/день', '5 AI-запросов/день', '2 изображения/день']
     },
     'starter': {
         'name': '🔸 Стартовый',
@@ -78,7 +83,7 @@ PLANS = {
         'download_limit': 30,
         'ai_limit': 50,
         'image_limit': 20,
-        'features': ['30 видео/день', '50 AI-запросов/день', '20 изображений/день', '720p', 'Приоритет']
+        'features': ['30 видео/день', '50 AI-запросов/день', '20 изображений/день', 'Приоритет']
     },
     'premium': {
         'name': '💎 Премиум',
@@ -86,7 +91,7 @@ PLANS = {
         'download_limit': 999999,
         'ai_limit': 999999,
         'image_limit': 999999,
-        'features': ['Безлимитные видео', 'Безлимитный AI', 'Безлимитные изображения', '4K', 'Приоритет 24/7']
+        'features': ['Безлимитные видео', 'Безлимитный AI', 'Безлимитные изображения', 'Приоритет 24/7']
     }
 }
 
@@ -127,6 +132,7 @@ def init_db():
     conn.close()
     logger.info("✅ База данных создана/проверена")
 
+# ========== ФУНКЦИИ БАЗЫ ДАННЫХ ==========
 def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -300,42 +306,33 @@ def get_stats():
     conn.close()
     return total, active, downloads, ai_requests, images, plans_stats
 
-# ========== ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНОК (ТОЧНО РАБОЧАЯ) ==========
+# ========== ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНОК ==========
 async def generate_image(prompt, style='realistic'):
-    """Генерация изображения через Pollinations (работает 100%)"""
+    """Генерация изображения через Pollinations"""
     try:
         style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
         logger.info(f"🎨 Генерирую: {style_prompt[:50]}...")
         
-        # Кодируем промпт для URL
-        encoded_prompt = urllib.parse.quote(style_prompt)
+        # Пробуем разные варианты URL
+        urls = [
+            f"https://image.pollinations.ai/prompt/{urllib.parse.quote(style_prompt)}?width=1024&height=1024&nologo=true&model=flux",
+            f"https://image.pollinations.ai/prompt/{urllib.parse.quote(style_prompt)}?width=1024&height=1024&nologo=true",
+            f"https://pollinations.ai/p/{urllib.parse.quote(style_prompt)}?width=1024&height=1024"
+        ]
         
-        # Используем проверенный рабочий URL
-        api_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
-        
-        logger.info(f"Запрос к Pollinations: {api_url[:100]}...")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=60) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
-                    if len(image_data) > 1000:  # Проверяем, что это не HTML с ошибкой
-                        logger.info(f"✅ Pollinations успешно сгенерировал ({len(image_data)} байт)")
-                        return image_data
-                    else:
-                        logger.warning(f"Слишком маленький ответ: {len(image_data)} байт")
-                else:
-                    logger.error(f"Pollinations ошибка {resp.status}")
-        
-        # Запасной вариант
-        fallback_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(fallback_url, timeout=60) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
-                    if len(image_data) > 1000:
-                        logger.info("✅ Pollinations (запасной) успешно")
-                        return image_data
+        for url in urls:
+            try:
+                logger.info(f"Пробую URL: {url[:100]}...")
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=60) as resp:
+                        if resp.status == 200:
+                            image_data = await resp.read()
+                            if len(image_data) > 1000:
+                                logger.info(f"✅ Pollinations успешно сгенерировал ({len(image_data)} байт)")
+                                return image_data
+            except Exception as e:
+                logger.warning(f"Ошибка при запросе: {e}")
+                continue
         
         logger.error("❌ Pollinations не сработал")
         return None
@@ -344,85 +341,118 @@ async def generate_image(prompt, style='realistic'):
         logger.error(f"Ошибка генерации: {e}")
         return None
 
-# ========== ФУНКЦИЯ AI-АССИСТЕНТА (ТОЧНО РАБОЧАЯ) ==========
+# ========== ФУНКЦИЯ AI-АССИСТЕНТА (DeepSeek) ==========
 async def ask_ai(prompt, user_id):
-    """Запрос к OpenRouter (проверено работает)"""
+    """Запрос к DeepSeek API"""
     can, left = check_ai_limit(user_id)
     if not can:
         return "❌ Ты исчерпал лимит AI-запросов на сегодня."
     
-    if not OPENROUTER_API_KEY:
-        logger.error("❌ Ключ OpenRouter не найден")
-        return "❌ Ошибка: ключ OpenRouter не найден. Добавь его в переменные окружения."
+    if not DEEPSEEK_API_KEY:
+        # Пробуем OpenRouter как запасной вариант
+        if OPENROUTER_API_KEY:
+            return await ask_ai_openrouter(prompt, user_id)
+        return "❌ Ошибка: ключи AI не найдены. Добавь DeepSeek ключ в переменные окружения."
     
-    logger.info(f"🤖 Отправляю запрос в OpenRouter: {prompt[:50]}...")
+    logger.info(f"🤖 Отправляю запрос в DeepSeek: {prompt[:50]}...")
     
-    # Пробуем разные модели по очереди
-    models = [
-        "google/gemini-1.5-flash:free",
-        "mistralai/mistral-7b-instruct:free",
-        "microsoft/phi-3-mini-128k-instruct:free"
-    ]
-    
-    for model in models:
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://openrouter.ai/api/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://t.me/TikTokSavebot",
-                    "X-Title": "TikTokSavebot"
-                }
-                
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 800
-                }
-                
-                logger.info(f"Пробую модель {model}")
-                
-                async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'choices' in data and len(data['choices']) > 0:
-                            result = data['choices'][0]['message']['content']
-                            increment_ai_request(user_id)
-                            logger.info(f"✅ OpenRouter успешно с моделью {model}")
-                            return result
-                    elif resp.status == 401:
-                        return "❌ Ошибка 401: Неверный API ключ OpenRouter"
-                    elif resp.status == 429:
-                        logger.warning(f"Модель {model} перегружена, пробую следующую")
-                        continue
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://api.deepseek.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 800
+            }
+            
+            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if 'choices' in data and len(data['choices']) > 0:
+                        result = data['choices'][0]['message']['content']
+                        increment_ai_request(user_id)
+                        logger.info("✅ DeepSeek успешно ответил")
+                        return result
                     else:
-                        logger.warning(f"Модель {model} вернула {resp.status}, пробую следующую")
-                        
-        except Exception as e:
-            logger.warning(f"Ошибка с моделью {model}: {e}")
-            continue
-    
-    return "🤖 *AI временно недоступен*\n\nВсе модели OpenRouter перегружены. Попробуй позже."
+                        logger.error(f"DeepSeek вернул неожиданный ответ: {data}")
+                        return "❌ Ошибка формата ответа от DeepSeek"
+                elif resp.status == 401:
+                    return "❌ Ошибка 401: Неверный ключ DeepSeek"
+                elif resp.status == 429:
+                    return "❌ Слишком много запросов к DeepSeek. Попробуй позже."
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"DeepSeek ошибка {resp.status}: {error_text}")
+                    return f"❌ Ошибка DeepSeek: {resp.status}"
+                    
+    except asyncio.TimeoutError:
+        logger.error("Таймаут DeepSeek")
+        return "❌ Таймаут при обращении к DeepSeek"
+    except Exception as e:
+        logger.error(f"DeepSeek ошибка: {e}")
+        return f"❌ Ошибка соединения: {str(e)[:100]}"
 
-# ========== КОМАНДА ДЛЯ ПРОВЕРКИ КЛЮЧА ==========
+# ========== ЗАПАСНАЯ ФУНКЦИЯ AI (OpenRouter) ==========
+async def ask_ai_openrouter(prompt, user_id):
+    """Запасной вариант через OpenRouter"""
+    logger.info("Пробую OpenRouter как запасной вариант...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://t.me/TikTokSavebot"
+            }
+            
+            payload = {
+                "model": "google/gemini-1.5-flash:free",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "max_tokens": 800
+            }
+            
+            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data['choices'][0]['message']['content']
+                    increment_ai_request(user_id)
+                    logger.info("✅ OpenRouter успешно ответил")
+                    return result
+                else:
+                    return f"❌ OpenRouter ошибка: {resp.status}"
+    except Exception as e:
+        return f"❌ OpenRouter ошибка: {str(e)[:100]}"
+
+# ========== КОМАНДА ДЛЯ ПРОВЕРКИ КЛЮЧЕЙ ==========
 async def check_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка наличия ключа OpenRouter"""
+    """Проверка наличия ключей"""
     if update.effective_user.id != ADMIN_ID:
         return
     
-    if OPENROUTER_API_KEY:
-        await update.message.reply_text(
-            f"✅ Ключ OpenRouter найден!\n"
-            f"Начинается с: {OPENROUTER_API_KEY[:15]}...\n"
-            f"Длина: {len(OPENROUTER_API_KEY)} символов"
-        )
+    text = "🔑 *Проверка ключей:*\n\n"
+    
+    if DEEPSEEK_API_KEY:
+        text += f"✅ DeepSeek: есть ({DEEPSEEK_API_KEY[:10]}...)\n"
     else:
-        await update.message.reply_text(
-            "❌ Ключ OpenRouter НЕ НАЙДЕН!\n"
-            "Проверь переменные окружения в Averma"
-        )
+        text += "❌ DeepSeek: НЕТ\n"
+    
+    if OPENROUTER_API_KEY:
+        text += f"✅ OpenRouter: есть (запасной)\n"
+    else:
+        text += "❌ OpenRouter: НЕТ\n"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def generate_image_with_style_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -584,7 +614,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "/export — экспорт CSV\n"
         text += "/ping — проверка\n"
         text += "/restart — перезапуск\n"
-        text += "/checkkey — проверить ключ\n"
+        text += "/checkkey — проверить ключи\n"
         text += "/testapi — тест API"
     
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -1263,7 +1293,7 @@ def main():
     # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот с AI и генерацией изображений запущен")
+    logger.info("✅ Бот с AI (DeepSeek) и генерацией изображений запущен")
     app.run_polling()
 
 if __name__ == '__main__':
