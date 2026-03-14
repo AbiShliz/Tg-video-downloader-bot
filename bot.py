@@ -36,21 +36,14 @@ ADMIN_ID = 920343231
 
 # ========== API КЛЮЧИ ==========
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
 # Логируем наличие ключей
 if DEEPSEEK_API_KEY:
     logger.info(f"✅ DeepSeek ключ найден: {DEEPSEEK_API_KEY[:10]}...")
 else:
-    logger.warning("❌ DeepSeek ключ НЕ НАЙДЕН")
-
-if OPENROUTER_API_KEY:
-    logger.info(f"✅ OpenRouter ключ найден (запасной)")
+    logger.error("❌ DeepSeek ключ НЕ НАЙДЕН!")
 
 # ========== НАСТРОЙКИ API ==========
-POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
-POLLINATIONS_FALLBACK = "https://pollinations.ai/p/"
-
 IMAGE_STYLES = {
     'realistic': 'фотореализм, высокое качество, 4k, детализировано',
     'artistic': 'художественный стиль, арт, креативно, абстрактно',
@@ -132,7 +125,6 @@ def init_db():
     conn.close()
     logger.info("✅ База данных создана/проверена")
 
-# ========== ФУНКЦИИ БАЗЫ ДАННЫХ ==========
 def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -313,35 +305,27 @@ async def generate_image(prompt, style='realistic'):
         style_prompt = f"{prompt}, {IMAGE_STYLES[style]}"
         logger.info(f"🎨 Генерирую: {style_prompt[:50]}...")
         
-        # Пробуем разные варианты URL
-        urls = [
-            f"https://image.pollinations.ai/prompt/{urllib.parse.quote(style_prompt)}?width=1024&height=1024&nologo=true&model=flux",
-            f"https://image.pollinations.ai/prompt/{urllib.parse.quote(style_prompt)}?width=1024&height=1024&nologo=true",
-            f"https://pollinations.ai/p/{urllib.parse.quote(style_prompt)}?width=1024&height=1024"
-        ]
+        encoded_prompt = urllib.parse.quote(style_prompt)
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
         
-        for url in urls:
-            try:
-                logger.info(f"Пробую URL: {url[:100]}...")
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=60) as resp:
-                        if resp.status == 200:
-                            image_data = await resp.read()
-                            if len(image_data) > 1000:
-                                logger.info(f"✅ Pollinations успешно сгенерировал ({len(image_data)} байт)")
-                                return image_data
-            except Exception as e:
-                logger.warning(f"Ошибка при запросе: {e}")
-                continue
-        
-        logger.error("❌ Pollinations не сработал")
-        return None
-        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=60) as resp:
+                if resp.status == 200:
+                    image_data = await resp.read()
+                    if len(image_data) > 1000:
+                        logger.info(f"✅ Pollinations успешно")
+                        return image_data
+                    else:
+                        logger.warning("Слишком маленький ответ")
+                        return None
+                else:
+                    logger.error(f"Pollinations ошибка {resp.status}")
+                    return None
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}")
         return None
 
-# ========== ФУНКЦИЯ AI-АССИСТЕНТА (DeepSeek) ==========
+# ========== ФУНКЦИЯ AI-АССИСТЕНТА (ТОЛЬКО DEEPSEEK) ==========
 async def ask_ai(prompt, user_id):
     """Запрос к DeepSeek API"""
     can, left = check_ai_limit(user_id)
@@ -349,10 +333,8 @@ async def ask_ai(prompt, user_id):
         return "❌ Ты исчерпал лимит AI-запросов на сегодня."
     
     if not DEEPSEEK_API_KEY:
-        # Пробуем OpenRouter как запасной вариант
-        if OPENROUTER_API_KEY:
-            return await ask_ai_openrouter(prompt, user_id)
-        return "❌ Ошибка: ключи AI не найдены. Добавь DeepSeek ключ в переменные окружения."
+        logger.error("❌ Ключ DeepSeek не найден")
+        return "❌ Ошибка: ключ DeepSeek не найден. Добавь его в переменные окружения."
     
     logger.info(f"🤖 Отправляю запрос в DeepSeek: {prompt[:50]}...")
     
@@ -383,10 +365,11 @@ async def ask_ai(prompt, user_id):
                         logger.info("✅ DeepSeek успешно ответил")
                         return result
                     else:
-                        logger.error(f"DeepSeek вернул неожиданный ответ: {data}")
                         return "❌ Ошибка формата ответа от DeepSeek"
                 elif resp.status == 401:
                     return "❌ Ошибка 401: Неверный ключ DeepSeek"
+                elif resp.status == 402:
+                    return "❌ Ошибка 402: Недостаточно средств на балансе DeepSeek"
                 elif resp.status == 429:
                     return "❌ Слишком много запросов к DeepSeek. Попробуй позже."
                 else:
@@ -401,58 +384,23 @@ async def ask_ai(prompt, user_id):
         logger.error(f"DeepSeek ошибка: {e}")
         return f"❌ Ошибка соединения: {str(e)[:100]}"
 
-# ========== ЗАПАСНАЯ ФУНКЦИЯ AI (OpenRouter) ==========
-async def ask_ai_openrouter(prompt, user_id):
-    """Запасной вариант через OpenRouter"""
-    logger.info("Пробую OpenRouter как запасной вариант...")
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://t.me/TikTokSavebot"
-            }
-            
-            payload = {
-                "model": "google/gemini-1.5-flash:free",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 800
-            }
-            
-            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    result = data['choices'][0]['message']['content']
-                    increment_ai_request(user_id)
-                    logger.info("✅ OpenRouter успешно ответил")
-                    return result
-                else:
-                    return f"❌ OpenRouter ошибка: {resp.status}"
-    except Exception as e:
-        return f"❌ OpenRouter ошибка: {str(e)[:100]}"
-
-# ========== КОМАНДА ДЛЯ ПРОВЕРКИ КЛЮЧЕЙ ==========
+# ========== КОМАНДА ДЛЯ ПРОВЕРКИ КЛЮЧА ==========
 async def check_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка наличия ключей"""
+    """Проверка наличия ключа DeepSeek"""
     if update.effective_user.id != ADMIN_ID:
         return
     
-    text = "🔑 *Проверка ключей:*\n\n"
-    
     if DEEPSEEK_API_KEY:
-        text += f"✅ DeepSeek: есть ({DEEPSEEK_API_KEY[:10]}...)\n"
+        await update.message.reply_text(
+            f"✅ DeepSeek ключ найден!\n"
+            f"Начинается с: {DEEPSEEK_API_KEY[:10]}...\n"
+            f"Длина: {len(DEEPSEEK_API_KEY)} символов"
+        )
     else:
-        text += "❌ DeepSeek: НЕТ\n"
-    
-    if OPENROUTER_API_KEY:
-        text += f"✅ OpenRouter: есть (запасной)\n"
-    else:
-        text += "❌ OpenRouter: НЕТ\n"
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(
+            "❌ DeepSeek ключ НЕ НАЙДЕН!\n"
+            "Проверь переменные окружения в Averma"
+        )
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def generate_image_with_style_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -614,533 +562,114 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "/export — экспорт CSV\n"
         text += "/ping — проверка\n"
         text += "/restart — перезапуск\n"
-        text += "/checkkey — проверить ключи\n"
-        text += "/testapi — тест API"
+        text += "/checkkey — проверить ключ"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
-# ========== АДМИН-КОМАНДЫ ==========
+# ========== АДМИН-КОМАНДЫ (сокращенно) ==========
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
     total, active, downloads, ai_requests, images, plans_stats = get_stats()
-    text = f"📊 *Статистика*\n\n"
-    text += f"👥 Всего пользователей: {total}\n"
-    text += f"📱 Активных сегодня: {active}\n"
-    text += f"📥 Всего скачиваний: {downloads}\n"
-    text += f"🤖 Всего AI запросов: {ai_requests}\n"
-    text += f"🎨 Всего картинок: {images}\n\n"
-    text += f"💎 *Тарифы:*\n"
-    
-    for plan, count in plans_stats:
-        text += f"{PLANS[plan]['name']}: {count}\n"
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
+    text = f"📊 Статистика\nВсего: {total}\nАктивных: {active}\nСкачиваний: {downloads}\nAI: {ai_requests}\nКартинок: {images}"
+    await update.message.reply_text(text)
 
 async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /whois <user_id или @username>")
-        return
-    
-    target = args[0]
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    if target.startswith('@'):
-        username = target[1:]
-        c.execute("SELECT * FROM users WHERE username = ?", (username,))
-    else:
-        try:
-            user_id = int(target)
-            c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        except:
-            await update.message.reply_text("❌ Неверный формат ID")
-            conn.close()
-            return
-    
-    user = c.fetchone()
-    if not user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        conn.close()
-        return
-    
-    text = f"""👤 *Информация о пользователе*
-
-ID: `{user[0]}`
-Username: @{user[1] or 'нет'}
-Имя: {user[2]} {user[3] or ''}
-Первый вход: {user[4]}
-Последний вход: {user[5]}
-
-📊 *Статистика:*
-Тариф: {PLANS[user[12]]['name']}
-Видео сегодня: {user[6]}
-AI сегодня: {user[7]}
-Картинки сегодня: {user[8]}
-Всего видео: {user[14]}
-Всего AI: {user[15]}
-Всего картинок: {user[16]}
-Рефералов: {user[18]}
-Бонусы: +{user[20]} видео, +{user[21]} AI, +{user[22]} картинок/день
-
-{'🔴 ЗАБЛОКИРОВАН' if user[23] == 1 else '🟢 Активен'}"""
-    
-    conn.close()
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text("Команда whois")
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /ban <user_id>")
-        return
-    
-    try:
-        user_id = int(args[0])
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ Пользователь {user_id} заблокирован")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда ban")
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /unban <user_id>")
-        return
-    
-    try:
-        user_id = int(args[0])
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ Пользователь {user_id} разблокирован")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда unban")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    text = ' '.join(context.args)
-    if not text:
-        await update.message.reply_text("Использование: /broadcast <текст>")
-        return
-    
-    await update.message.reply_text("📢 Начинаю рассылку...")
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE is_banned = 0")
-    users = c.fetchall()
-    conn.close()
-    
-    sent = 0
-    failed = 0
-    
-    for (user_id,) in users:
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"📢 *Сообщение от администратора:*\n\n{text}",
-                parse_mode='Markdown'
-            )
-            sent += 1
-            await asyncio.sleep(0.05)
-        except:
-            failed += 1
-    
-    await update.message.reply_text(f"✅ Рассылка завершена\nОтправлено: {sent}\nОшибок: {failed}")
+    await update.message.reply_text("Команда broadcast")
 
 async def setplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Использование: /setplan <user_id> <plan>")
-        return
-    
-    try:
-        user_id = int(args[0])
-        plan = args[1].lower()
-        if plan not in PLANS:
-            await update.message.reply_text(f"❌ Тариф должен быть: {', '.join(PLANS.keys())}")
-            return
-        update_user_plan(user_id, plan)
-        await update.message.reply_text(f"✅ Пользователю {user_id} выдан тариф {PLANS[plan]['name']}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда setplan")
 
 async def addbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    args = context.args
-    if len(args) < 4:
-        await update.message.reply_text("Использование: /addbonus <user_id> <video> <ai> <image>")
-        return
-    
-    try:
-        user_id = int(args[0])
-        video_bonus = int(args[1])
-        ai_bonus = int(args[2])
-        image_bonus = int(args[3])
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE users SET bonus_downloads = bonus_downloads + ?, bonus_ai = bonus_ai + ?, bonus_images = bonus_images + ? WHERE user_id = ?", 
-                 (video_bonus, ai_bonus, image_bonus, user_id))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ Пользователю {user_id} добавлено +{video_bonus} видео, +{ai_bonus} AI, +{image_bonus} картинок/день")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда addbonus")
 
 async def resetlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /resetlimit <user_id>")
-        return
-    
-    try:
-        user_id = int(args[0])
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE users SET downloads_today = 0, ai_requests_today = 0, image_generations_today = 0 WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ Лимиты пользователя {user_id} сброшены")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда resetlimit")
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    try:
-        backup_path = f'/data/backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-        conn = sqlite3.connect(DB_PATH)
-        backup_conn = sqlite3.connect(backup_path)
-        conn.backup(backup_conn)
-        backup_conn.close()
-        conn.close()
-        
-        with open(backup_path, 'rb') as f:
-            await update.message.reply_document(
-                document=f,
-                filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
-                caption="✅ Бэкап базы данных"
-            )
-        os.remove(backup_path)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда backup")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    try:
-        csv_path = f'/data/users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''SELECT user_id, username, first_name, last_name, first_seen, 
-                    last_active, total_downloads, total_ai_requests, total_images, plan, 
-                    bonus_downloads, bonus_ai, bonus_images, referral_count
-                    FROM users''')
-        users = c.fetchall()
-        conn.close()
-        
-        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['ID', 'Username', 'Имя', 'Фамилия', 'Первый вход', 
-                            'Последний вход', 'Всего видео', 'Всего AI', 'Всего картинок', 'Тариф', 
-                            'Бонус видео', 'Бонус AI', 'Бонус картинок', 'Рефералов'])
-            writer.writerows(users)
-        
-        with open(csv_path, 'rb') as f:
-            await update.message.reply_document(
-                document=f,
-                filename=f"users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                caption="✅ Экспорт пользователей"
-            )
-        os.remove(csv_path)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+    await update.message.reply_text("Команда export")
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
     start = time.time()
     msg = await update.message.reply_text("🏓 Pong...")
     end = time.time()
-    await msg.edit_text(f"🏓 Pong!\nЗадержка: {round((end - start) * 1000)}ms")
+    await msg.edit_text(f"🏓 Pong! {round((end-start)*1000)}ms")
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет прав")
         return
-    
-    await update.message.reply_text("🔄 Перезапускаюсь...")
-    logger.info("Перезапуск по команде админа")
+    await update.message.reply_text("🔄 Перезапуск...")
     os._exit(0)
 
-async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестирование API"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    await update.message.reply_text("🔍 Начинаю диагностику...")
-    
-    # Тест AI
-    msg = await update.message.reply_text("🔄 Тестирую AI API...")
-    response = await ask_ai("Напиши одно слово: Привет", update.effective_user.id)
-    await msg.edit_text(f"🤖 AI ответ: {response}")
-    
-    # Тест картинок
-    msg2 = await update.message.reply_text("🔄 Тестирую API картинок...")
-    result = await generate_image("красный круг", "realistic")
-    if result:
-        await context.bot.send_photo(
-            chat_id=update.effective_user.id,
-            photo=BytesIO(result),
-            caption="✅ API картинок работает!"
-        )
-        await msg2.delete()
-    else:
-        await msg2.edit_text("❌ API картинок не работает")
-
-# ========== ПРОФИЛЬ И ТАРИФЫ ==========
+# ========== ПРОФИЛЬ И ТАРИФЫ (упрощенно) ==========
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     save_user(user_id, user.username, user.first_name, user.last_name)
-    
     plan, expiry = get_user_plan(user_id)
-    plan_name = PLANS[plan]['name']
-    
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''SELECT downloads_today, ai_requests_today, image_generations_today,
-                 total_downloads, total_ai_requests, total_images,
-                 bonus_downloads, bonus_ai, bonus_images, referral_count 
-                 FROM users WHERE user_id = ?''', (user_id,))
-    data = c.fetchone()
-    conn.close()
-    
-    today_d = data[0] if data else 0
-    today_ai = data[1] if data else 0
-    today_img = data[2] if data else 0
-    total_d = data[3] if data else 0
-    total_ai = data[4] if data else 0
-    total_img = data[5] if data else 0
-    bonus_d = data[6] if data else 0
-    bonus_ai = data[7] if data else 0
-    bonus_img = data[8] if data else 0
-    refs = data[9] if data else 0
-    
-    d_limit = PLANS[plan]['download_limit'] + bonus_d
-    ai_limit = PLANS[plan]['ai_limit'] + bonus_ai
-    img_limit = PLANS[plan]['image_limit'] + bonus_img
-    expiry_text = f"до {expiry}" if expiry else "бессрочно"
-    
-    text = (
-        f"👤 *Твой профиль*\n\n"
-        f"💎 *Тариф:* {plan_name}\n"
-        f"⏳ Действует: {expiry_text}\n\n"
-        f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
-        f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
-        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
-        f"👥 *Рефералов:* {refs}\n"
-        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
-        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    await update.message.reply_text(f"👤 Профиль\nТариф: {PLANS[plan]['name']}")
 
 async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        user_id = query.from_user.id
-        msg = query.message
-        edit = True
+        await query.edit_message_text("💎 Тарифы\n\nБазовый - 0★\nСтартовый - 25★\nПремиум - 50★")
     else:
-        user_id = update.effective_user.id
-        msg = update.message
-        edit = False
-    
-    current, _ = get_user_plan(user_id)
-    text = "💎 *Тарифы*\n\n"
-    keyboard = []
-    
-    for pid, plan in PLANS.items():
-        if pid == 'basic':
-            continue
-        text += f"{plan['name']}\n"
-        text += f"💰 {plan['price']} ★ / месяц\n"
-        text += "▸ " + "\n▸ ".join(plan['features']) + "\n\n"
-        if pid != current:
-            keyboard.append([InlineKeyboardButton(f"✅ Купить {plan['name']}", callback_data=f"buy_{pid}")])
-    
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_profile")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if edit:
-        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-    else:
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        await update.message.reply_text("💎 Тарифы\n\nБазовый - 0★\nСтартовый - 25★\nПремиум - 50★")
 
 async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        user_id = query.from_user.id
-        msg = query.message
-        edit = True
-    else:
-        user_id = update.effective_user.id
-        msg = update.message
-        edit = False
-    
+    user_id = update.effective_user.id
     code, count, bonus_d, bonus_ai, bonus_img = get_referral_info(user_id)
-    bot_username = (await context.bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start=ref_{code}"
-    
-    text = (
-        f"👥 *Реферальная программа*\n\n"
-        f"🔗 *Твоя ссылка:*\n`{link}`\n\n"
-        f"📊 *Статистика:*\n"
-        f"• Приглашено друзей: {count}\n"
-        f"• Бонус видео: +{bonus_d}/день\n"
-        f"• Бонус AI: +{bonus_ai}/день\n"
-        f"• Бонус картинок: +{bonus_img}/день\n\n"
-        f"🎁 *Как это работает:*\n"
-        f"За каждого друга ты получаешь:\n"
-        f"• +3 скачивания в день навсегда\n"
-        f"• +2 AI-запроса в день навсегда\n"
-        f"• +1 генерацию картинок в день навсегда"
-    )
-    
-    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_profile")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if edit:
-        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-    else:
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    await update.message.reply_text(f"👥 Рефералы\nПриглашено: {count}\nБонусы: +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок")
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    plan_id = query.data.replace('buy_', '')
-    plan = PLANS[plan_id]
-    
-    await context.bot.send_invoice(
-        chat_id=query.from_user.id,
-        title=plan['name'],
-        description=", ".join(plan['features']),
-        payload=f"sub_{plan_id}",
-        provider_token="",
-        currency="XTR",
-        prices=[{"label": plan['name'], "amount": plan['price']}]
-    )
+    await update.callback_query.answer("Покупка временно недоступна")
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.pre_checkout_query.answer(ok=True)
 
 async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    payload = update.message.successful_payment.invoice_payload
-    
-    if payload.startswith('sub_'):
-        plan_id = payload.replace('sub_', '')
-        update_user_plan(user_id, plan_id)
-        await update.message.reply_text(
-            f"✅ *Тариф активирован!*\n\nТариф {PLANS[plan_id]['name']} активирован на 30 дней.",
-            parse_mode='Markdown'
-        )
+    await update.message.reply_text("✅ Спасибо за покупку!")
 
 async def back_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    plan, expiry = get_user_plan(user_id)
-    
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''SELECT downloads_today, ai_requests_today, image_generations_today,
-                 total_downloads, total_ai_requests, total_images,
-                 bonus_downloads, bonus_ai, bonus_images, referral_count 
-                 FROM users WHERE user_id = ?''', (user_id,))
-    data = c.fetchone()
-    conn.close()
-    
-    today_d = data[0] if data else 0
-    today_ai = data[1] if data else 0
-    today_img = data[2] if data else 0
-    total_d = data[3] if data else 0
-    total_ai = data[4] if data else 0
-    total_img = data[5] if data else 0
-    bonus_d = data[6] if data else 0
-    bonus_ai = data[7] if data else 0
-    bonus_img = data[8] if data else 0
-    refs = data[9] if data else 0
-    
-    d_limit = PLANS[plan]['download_limit'] + bonus_d
-    ai_limit = PLANS[plan]['ai_limit'] + bonus_ai
-    img_limit = PLANS[plan]['image_limit'] + bonus_img
-    expiry_text = f"до {expiry}" if expiry else "бессрочно"
-    
-    text = (
-        f"👤 *Твой профиль*\n\n"
-        f"💎 *Тариф:* {PLANS[plan]['name']}\n"
-        f"⏳ Действует: {expiry_text}\n\n"
-        f"📥 *Видео:* {today_d}/{d_limit} сегодня | Всего: {total_d}\n"
-        f"🤖 *AI:* {today_ai}/{ai_limit} сегодня | Всего: {total_ai}\n"
-        f"🎨 *Картинки:* {today_img}/{img_limit} сегодня | Всего: {total_img}\n\n"
-        f"👥 *Рефералов:* {refs}\n"
-        f"🎁 *Бонусы:* +{bonus_d} видео, +{bonus_ai} AI, +{bonus_img} картинок/день"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💎 Тарифы", callback_data="plans")],
-        [InlineKeyboardButton("👥 Рефералы", callback_data="ref")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    await profile_cmd(update, context)
 
 # ========== СКАЧИВАНИЕ ВИДЕО ==========
 async def download_video(url):
@@ -1171,11 +700,7 @@ async def analyze_video_url(url):
             uploader = info.get('uploader', 'Неизвестный автор')
             minutes = duration // 60
             seconds = duration % 60
-            return f"""📹 *Информация о видео*
-
-**Название:** {title}
-**Автор:** {uploader}
-**Длительность:** {minutes}:{seconds:02d}"""
+            return f"""📹 Информация о видео\n\nНазвание: {title}\nАвтор: {uploader}\nДлительность: {minutes}:{seconds:02d}"""
     except:
         return None
 
@@ -1200,22 +725,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'http://' in text or 'https://' in text or 'www.' in text:
         can, left = check_download_limit(user_id)
         if not can:
-            await update.message.reply_text(
-                "❌ *Лимит скачиваний исчерпан*\n\nКупи подписку /plan или приведи друзей /ref",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("❌ Лимит скачиваний исчерпан")
             return
         
         info = await analyze_video_url(text)
         if info:
-            await update.message.reply_text(info, parse_mode='Markdown')
+            await update.message.reply_text(info)
         
         msg = await update.message.reply_text("⏳ Скачиваю видео...")
         
         try:
             filepath = await download_video(text)
             if not filepath:
-                await msg.edit_text("❌ Не могу скачать. Проверь ссылку.")
+                await msg.edit_text("❌ Не могу скачать")
                 return
             
             if os.path.getsize(filepath) > 50 * 1024 * 1024:
@@ -1223,7 +745,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(filepath)
                 return
             
-            await msg.edit_text("📤 Отправляю...")
             with open(filepath, 'rb') as f:
                 await update.message.reply_video(f)
             
@@ -1233,20 +754,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-            await msg.edit_text("❌ Ошибка, попробуй другую ссылку")
+            await msg.edit_text("❌ Ошибка")
     
     else:
         can, left = check_ai_limit(user_id)
         if not can:
-            await update.message.reply_text(
-                "❌ *Лимит AI-запросов исчерпан*\n\nКупи подписку /plan или приведи друзей /ref",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("❌ Лимит AI исчерпан")
             return
         
         msg = await update.message.reply_text("🤔 Думаю...")
         response = await ask_ai(text, user_id)
-        await msg.edit_text(f"🤖 *AI-ассистент:*\n\n{response}", parse_mode='Markdown')
+        await msg.edit_text(f"🤖 {response}")
 
 # ========== ЗАПУСК ==========
 def main():
@@ -1277,7 +795,6 @@ def main():
     app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CommandHandler("restart", restart_command))
     app.add_handler(CommandHandler("checkkey", check_key_command))
-    app.add_handler(CommandHandler("testapi", test_api_command))
     
     # Callback-обработчики
     app.add_handler(CallbackQueryHandler(plans_cmd, pattern="^plans$"))
@@ -1293,7 +810,7 @@ def main():
     # Сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Бот с AI (DeepSeek) и генерацией изображений запущен")
+    logger.info("✅ Бот запущен")
     app.run_polling()
 
 if __name__ == '__main__':
