@@ -52,29 +52,107 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # Путь к шрифту для мемов
 FONT_PATH = 'impact.ttf'  # лежит в корне
 
-# Базовые опции для yt-dlp
-YDL_OPTIONS = {
-    'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-    'merge_output_format': 'mp4',
-    'postprocessors': [{
-        'key': 'FFmpegVideoConvertor',
-        'preferedformat': 'mp4',
-    }] if FFMPEG_AVAILABLE else [],
+# ========== НАСТРОЙКИ ДЛЯ ОБХОДА БЛОКИРОВОК ==========
+YDL_OPTS_COMMON = {
     'quiet': True,
     'no_warnings': True,
+    'extract_flat': False,
+    'ignoreerrors': True,
+    'nocheckcertificate': True,
+    'geo_bypass': True,
+    'geo_bypass_country': 'US',
 }
+
+# Заголовки как у реального браузера
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
+]
+
+# Cookie-файлы для разных платформ (можно добавить позже)
+COOKIE_FILES = {
+    'youtube': 'cookies/youtube.txt',
+    'instagram': 'cookies/instagram.txt',
+    'tiktok': 'cookies/tiktok.txt'
+}
+
+# Базовые опции для yt-dlp
+def get_base_opts():
+    """Базовые опции с случайным User-Agent"""
+    return {
+        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'merge_output_format': 'mp4',
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }] if FFMPEG_AVAILABLE else [],
+        'headers': {
+            'User-Agent': random.choice(USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate',
+        }
+    }
 
 # Поддерживаемые платформы
 PLATFORMS = {
-    'youtube': {'name': 'YouTube', 'patterns': ['youtube.com', 'youtu.be'], 'enabled': True},
-    'tiktok': {'name': 'TikTok', 'patterns': ['tiktok.com'], 'enabled': True},
-    'instagram': {'name': 'Instagram', 'patterns': ['instagram.com'], 'enabled': True},
-    'vk': {'name': 'VK', 'patterns': ['vk.com', 'vkontakte.ru'], 'enabled': True},
-    'pinterest': {'name': 'Pinterest', 'patterns': ['pinterest.com', 'pin.it'], 'enabled': True},
-    'twitter': {'name': 'Twitter/X', 'patterns': ['twitter.com', 'x.com'], 'enabled': True},
-    'reddit': {'name': 'Reddit', 'patterns': ['reddit.com'], 'enabled': True},
-    'rutube': {'name': 'Rutube', 'patterns': ['rutube.ru'], 'enabled': True},
-    'dzen': {'name': 'Дзен', 'patterns': ['dzen.ru', 'zen.yandex.ru'], 'enabled': True}
+    'youtube': {
+        'name': 'YouTube', 
+        'patterns': ['youtube.com', 'youtu.be'], 
+        'enabled': True,
+        'needs_cookies': True
+    },
+    'tiktok': {
+        'name': 'TikTok', 
+        'patterns': ['tiktok.com'], 
+        'enabled': True,
+        'needs_cookies': False
+    },
+    'instagram': {
+        'name': 'Instagram', 
+        'patterns': ['instagram.com'], 
+        'enabled': True,
+        'needs_cookies': True
+    },
+    'vk': {
+        'name': 'VK', 
+        'patterns': ['vk.com', 'vkontakte.ru'], 
+        'enabled': True,
+        'needs_cookies': False
+    },
+    'pinterest': {
+        'name': 'Pinterest', 
+        'patterns': ['pinterest.com', 'pin.it'], 
+        'enabled': True,
+        'needs_cookies': False
+    },
+    'twitter': {
+        'name': 'Twitter/X', 
+        'patterns': ['twitter.com', 'x.com'], 
+        'enabled': True,
+        'needs_cookies': True
+    },
+    'reddit': {
+        'name': 'Reddit', 
+        'patterns': ['reddit.com'], 
+        'enabled': True,
+        'needs_cookies': False
+    },
+    'rutube': {
+        'name': 'Rutube', 
+        'patterns': ['rutube.ru'], 
+        'enabled': True,
+        'needs_cookies': False
+    },
+    'dzen': {
+        'name': 'Дзен', 
+        'patterns': ['dzen.ru', 'zen.yandex.ru'], 
+        'enabled': True,
+        'needs_cookies': False
+    }
 }
 
 # ========== ТАРИФЫ ==========
@@ -289,69 +367,131 @@ def detect_platform(url):
 
 # ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 def get_ydl_opts_for_platform(platform):
-    """Возвращает опции для конкретной платформы"""
-    base_opts = YDL_OPTIONS.copy()
+    """Возвращает опции для конкретной платформы с обходом блокировок"""
+    base_opts = get_base_opts()
     
-    # Специфические настройки для разных платформ
+    # Добавляем общие настройки для обхода блокировок
+    base_opts.update(YDL_OPTS_COMMON)
+    
+    # Добавляем специфические настройки для разных платформ
     if platform == 'vk':
         base_opts['extractor_args'] = {'vk': {'prefer_mp4': True}}
+    
     elif platform == 'twitter':
         base_opts['format'] = 'best[ext=mp4]/best'
+        base_opts['extractor_args'] = {'twitter': {'include_entities': True}}
+    
     elif platform == 'reddit':
         base_opts['format'] = 'best[ext=mp4]/best'
     
+    elif platform == 'youtube':
+        # Специальные настройки для YouTube
+        base_opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['android', 'web', 'ios'],  # Используем разные клиенты
+                'skip': ['hls', 'dash'],  # Пропускаем ненужное
+                'include_ads': False,
+            }
+        }
+        base_opts['cookiefile'] = COOKIE_FILES.get('youtube') if os.path.exists(COOKIE_FILES.get('youtube', '')) else None
+    
+    elif platform == 'instagram':
+        base_opts['extractor_args'] = {'instagram': {'include_entities': True}}
+        base_opts['cookiefile'] = COOKIE_FILES.get('instagram') if os.path.exists(COOKIE_FILES.get('instagram', '')) else None
+    
+    elif platform == 'tiktok':
+        base_opts['extractor_args'] = {'tiktok': {'api_hostname': 'api16-normal-c-useast1a.tiktokv.com'}}
+    
     return base_opts
 
-async def download_video(url):
-    """Универсальная функция скачивания видео"""
-    try:
-        platform_id, platform_name = detect_platform(url)
-        
-        if not platform_id:
-            return None, "❌ Платформа не поддерживается"
-        
-        logger.info(f"📥 Скачиваю с {platform_name}: {url[:50]}...")
-        
-        # Уникальное имя файла
-        timestamp = int(time.time())
-        random_id = random.randint(1000, 9999)
-        output_template = os.path.join(DOWNLOAD_DIR, f'video_{timestamp}_{random_id}.%(ext)s')
-        
-        # Получаем опции для платформы
-        ydl_opts = get_ydl_opts_for_platform(platform_id)
-        ydl_opts['outtmpl'] = output_template
-        
-        # Скачиваем
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+async def download_video(url, retry_count=3):
+    """Универсальная функция скачивания видео с повторными попытками"""
+    for attempt in range(retry_count):
+        try:
+            platform_id, platform_name = detect_platform(url)
             
-            # Проверяем, создался ли mp4 после конвертации
-            base = os.path.splitext(filename)[0]
-            mp4_file = f"{base}.mp4"
+            if not platform_id:
+                return None, "❌ Платформа не поддерживается"
             
-            if os.path.exists(mp4_file):
-                final_file = mp4_file
-            elif os.path.exists(filename):
-                final_file = filename
-            else:
-                return None, "❌ Не удалось найти скачанный файл"
+            logger.info(f"📥 Попытка {attempt + 1}/{retry_count} скачивания с {platform_name}: {url[:50]}...")
             
-            # Получаем информацию о видео
-            title = info.get('title', 'Без названия')
-            duration = info.get('duration', 0)
-            uploader = info.get('uploader', 'Неизвестно')
+            # Уникальное имя файла
+            timestamp = int(time.time())
+            random_id = random.randint(1000, 9999)
+            output_template = os.path.join(DOWNLOAD_DIR, f'video_{timestamp}_{random_id}.%(ext)s')
             
-            return final_file, {
-                'title': title,
-                'duration': duration,
-                'uploader': uploader,
-                'platform': platform_name
-            }
+            # Получаем опции для платформы
+            ydl_opts = get_ydl_opts_for_platform(platform_id)
+            ydl_opts['outtmpl'] = output_template
             
-    except Exception as e:
-        logger.error(f"Ошибка скачивания: {e}")
-        return None, f"❌ Ошибка: {str(e)[:100]}"
+            # Скачиваем
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                
+                if info is None:
+                    if attempt < retry_count - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    return None, "❌ Не удалось получить информацию о видео"
+                
+                filename = ydl.prepare_filename(info)
+                
+                # Проверяем, создался ли mp4 после конвертации
+                base = os.path.splitext(filename)[0]
+                mp4_file = f"{base}.mp4"
+                
+                if os.path.exists(mp4_file):
+                    final_file = mp4_file
+                elif os.path.exists(filename):
+                    final_file = filename
+                else:
+                    if attempt < retry_count - 1:
+                        logger.warning(f"Попытка {attempt + 1} не удалась, пробую снова...")
+                        await asyncio.sleep(2)
+                        continue
+                    return None, "❌ Не удалось найти скачанный файл"
+                
+                # Получаем информацию о видео
+                title = info.get('title', 'Без названия')
+                duration = info.get('duration', 0)
+                uploader = info.get('uploader', 'Неизвестно')
+                
+                return final_file, {
+                    'title': title,
+                    'duration': duration,
+                    'uploader': uploader,
+                    'platform': platform_name
+                }
+                
+        except Exception as e:
+            error_str = str(e)
+            logger.error(f"Ошибка скачивания (попытка {attempt + 1}): {error_str}")
+            
+            # Понятные сообщения для пользователя
+            if "Video unavailable" in error_str:
+                if attempt < retry_count - 1:
+                    await asyncio.sleep(3)
+                    continue
+                return None, "❌ Видео недоступно (удалено, с возрастным ограничением или требует cookies)"
+            
+            elif "Private video" in error_str:
+                return None, "❌ Это приватное видео, доступ ограничен"
+            
+            elif "copyright" in error_str.lower():
+                return None, "❌ Видео заблокировано по копирайту"
+            
+            elif "age" in error_str.lower() or "18" in error_str:
+                return None, "❌ Видео с возрастным ограничением (18+)"
+            
+            elif "login" in error_str.lower() or "cookie" in error_str.lower():
+                return None, "❌ Для этой платформы требуется авторизация (нужны cookies)"
+            
+            # Другие ошибки
+            if attempt < retry_count - 1:
+                await asyncio.sleep(2)
+                continue
+    
+    return None, "❌ Не удалось скачать видео после нескольких попыток"
 
 def get_video_info(url):
     """Получить информацию о видео без скачивания"""
@@ -1079,6 +1219,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ЗАПУСК ==========
 def main():
     os.makedirs('/data', exist_ok=True)
+    
+    # Создаем папку для cookies (опционально)
+    os.makedirs('cookies', exist_ok=True)
+    
     init_db()
     
     # Проверка наличия ffmpeg
